@@ -1,0 +1,22 @@
+app:
+  addr: 0.0.0.0
+  port: 20000
+  version: 1.0.0
+  Nfip: 127.0.0.1
+  telnetAddr: ":20055"
+
+log:
+  logPath: /var/log/monitor_agent/
+  logLevel: info
+
+db:
+  redis:
+    addr: 127.0.0.1
+    port: 6379
+    password: Jxtx2024@88
+
+oms:
+  omsProto: "https"
+  omsPort: ""
+  omsIp: ""
+  omsK8s: false
