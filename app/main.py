@@ -16,8 +16,8 @@ async def lifespan(app: FastAPI):
     init_redis()
 
     # 启动后台模块（后续实现 modules.Run()）
-    from app.modules.run import start_modules
-    start_modules()
+#    from app.modules.run import start_modules
+#    start_modules()
 
     yield
     log.info("Monitor Agent shutting down...")
