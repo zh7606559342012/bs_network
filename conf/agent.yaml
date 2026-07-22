@@ -1,22 +1,22 @@
 app:
-  addr: 0.0.0.0
-  port: 20000
-  version: 1.0.0
-  Nfip: 127.0.0.1
-  telnetAddr: ":20055"
+  addr: "0.0.0.0"
+  port: "20000"
+  version: "1.0.0"
+  nfip: "127.0.0.1"
+  telnet_addr: ":20055"
 
 log:
-  logPath: /var/log/monitor_agent/
-  logLevel: info
+  log_path: "/var/log/monitor_agent/"
+  log_level: "INFO"
 
 db:
   redis:
-    addr: 127.0.0.1
+    addr: "127.0.0.1"
     port: 6379
-    password: Jxtx2024@88
+    password: "Jxtx2024@88"
 
 oms:
-  omsProto: "https"
-  omsPort: ""
-  omsIp: ""
-  omsK8s: false
+  oms_proto: "https"
+  oms_port: ""
+  oms_ip: ""
+  oms_k8s: false
