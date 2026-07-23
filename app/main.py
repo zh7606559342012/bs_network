@@ -4,6 +4,7 @@ from app.core.config import settings
 from app.core.logger import log, setup_logger
 from app.core.database import init_redis
 from app.routers import oms, gnb
+from app.modules.run import start_modules
 import uvicorn
 
 
@@ -16,8 +17,7 @@ async def lifespan(app: FastAPI):
     init_redis()
 
     # 启动后台模块（后续实现 modules.Run()）
-#    from app.modules.run import start_modules
-#    start_modules()
+    start_modules()
 
     yield
     log.info("Monitor Agent shutting down...")
