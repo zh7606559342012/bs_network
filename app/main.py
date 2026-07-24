@@ -33,12 +33,6 @@ app = FastAPI(
 app.include_router(oms.router, prefix="/monitor_agent/v1")
 app.include_router(gnb.router, prefix="/monitor_agent/v1/gnb")
 
-
-@app.get("/health")
-async def health_check():
-    return {"status": "ok", "version": settings.app.version}
-
-
 if __name__ == "__main__":
     uvicorn.run(
         "app.main:app",

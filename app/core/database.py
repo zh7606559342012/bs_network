@@ -42,21 +42,31 @@ def get_conf_from_redis():
 
 
 def init_base_station_cache():
-    """从 Redis 加载所有 bs: 开头的基站到全局缓存"""
-    global redis_client
-    with CacheMutex:
-        BaseStationCache.clear()
+    """启动时从 Redis 加载基站数据到内存缓存（适配 Hash 存储）"""
+    global BaseStationCache, redis_client  # 声明使用全局变量
+
+    try:
+        # ✅ 直接使用全局 redis_client，它已经在 init_redis() 中被初始化了
+        # 不需要再调用任何 get 函数
+        if redis_client is None:
+            log.warning("Redis client is not initialized, skip loading cache")
+            return
+
+        # 查找所有基站键
         keys = redis_client.keys("bs:*")
+
         for key in keys:
-            data = redis_client.get(key)
-            if data:
-                try:
-                    station = json.loads(data)
-                    BaseStationCache[station["station_id"]] = station
-                    log.debug(f"Loaded station: {station['station_id']} ({station['ip']}) {station['name']}")
-                except Exception as e:
-                    log.warning(f"Parse station {key} failed: {e}")
-        log.info(f"BaseStationCache initialized with {len(BaseStationCache)} stations")
+            # 使用 hgetall 获取 Hash 中所有字段
+            station_data = redis_client.hgetall(key)
+            if station_data:
+                # 注意：如果 decode_responses=True，返回的数据已经是字符串，不需要再 decode
+                # 从键名提取 station_id，例如从 "bs:1001" 提取 1001
+                station_id = int(key.split(':')[1])
+                BaseStationCache[station_id] = station_data
+
+        log.info(f"Loaded {len(BaseStationCache)} base stations from Redis (Hash)")
+    except Exception as e:
+        log.error(f"Failed to load base station cache: {e}")
 
 
 def get_redis():

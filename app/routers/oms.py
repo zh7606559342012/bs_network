@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from datetime import datetime
 from app.core.logger import log
 from app.core.database import get_redis
+from app.core.config import settings
 import redis
 
 router = APIRouter()
@@ -35,3 +36,8 @@ async def handler_heartbeat(
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return {"timeStamp": timestamp, "code": "200", "message": "ok"}
+
+@router.get("/health")
+async def health_check():
+    """健康检查接口"""
+    return {"status": "ok", "version": settings.app.version}

@@ -2,7 +2,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
 from app.modules.anomaly import detect_network_anomaly
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 import json
 import asyncio
 import os
@@ -62,16 +63,39 @@ async def ping_base_station(station):
     }
 
 
+def get_next_seq(station_id, ip, log_path):
+    """从日志文件中读取最后的序列号，并返回下一个"""
+    seq = 1  # 默认从1开始
+    try:
+        if log_path.exists():
+            with open(log_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+                if lines:
+                    # 读取最后一行，提取 seq 值
+                    last_line = lines[-1]
+                    # 格式: 2026-07-23 16:20:25 | seq=000001 | OK | rtt=0.75 ms
+                    if "seq=" in last_line:
+                        seq_part = last_line.split("seq=")[1].split(" |")[0]
+                        seq = int(seq_part) + 1
+    except Exception as e:
+        log.warning(f"读取序列号失败: {e}")
+    return seq
+
+
 def write_ping_log(ping_result):
-    """按 IP 写日志文件"""
+    """按 IP 写日志文件（带序列号持久化）"""
     if not ping_result:
         return
+
     ip = ping_result["ip"].replace(".", "")
     log_dir = Path("/var/log/monitor_agent")
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"ping_{ip}.log"
 
-    log_line = f"{ping_result['time']} | seq=000001 | {ping_result['status']:4} | rtt={ping_result['rtt_ms']:.2f} ms\n"
+    # ✅ 从日志文件读取下一个序列号
+    seq = get_next_seq(ping_result["station_id"], ip, log_path)
+
+    log_line = f"{ping_result['time']} | seq={seq:06d} | {ping_result['status']:4} | rtt={ping_result['rtt_ms']:.2f} ms\n"
 
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(log_line)
@@ -113,11 +137,21 @@ def sync_base_station_cache():
     with CacheMutex:
         keys = rds.keys("bs:*")
         for key in keys:
-            data = rds.get(key)
-            if data:
+            # ✅ 修改点1: 使用 hgetall 获取 Hash 数据
+            station_data = rds.hgetall(key)
+            if station_data:
                 try:
-                    station = json.loads(data)
-                    redis_data[station["station_id"]] = station
+                    # ✅ 修改点2: 因为 decode_responses=True，数据已经是字符串
+                    # 从键名提取 station_id
+                    station_id = int(key.split(':')[1])
+                    # 构建 station 字典，确保包含所有字段
+                    station = {
+                        "station_id": station_id,
+                        "ip": station_data.get("ip", ""),
+                        "name": station_data.get("name", ""),
+                        "region": station_data.get("region", "")
+                    }
+                    redis_data[station_id] = station
                 except Exception as e:
                     log.warning(f"Parse {key} failed: {e}")
 
@@ -144,11 +178,73 @@ def sync_base_station_cache():
     log.info(f"基站缓存同步完成，共 {len(BaseStationCache)} 个基站，耗时 {datetime.now() - start}")
 
 
+def clean_old_ping_logs():
+    """清理超过10天的Ping日志"""
+    log_dir = Path("/var/log/monitor_agent")
+    if not log_dir.exists():
+        log.warning(f"日志目录不存在: {log_dir}")
+        return
+
+    cutoff_time = datetime.now() - timedelta(days=10)
+    total_cleaned = 0
+    total_files = 0
+
+    log.info(f"=== 开始清理超过10天的Ping日志 (截止时间: {cutoff_time.strftime('%Y-%m-%d %H:%M:%S')}) ===")
+
+    # 查找所有 ping_*.log 文件
+    ping_files = list(log_dir.glob("ping_*.log"))
+
+    for log_file in ping_files:
+        try:
+            cleaned_lines = []
+            kept_count = 0
+            removed_count = 0
+
+            with open(log_file, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+
+            for line in lines:
+                # 解析时间戳（格式: 2026-07-23 17:21:09）
+                match = re.match(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", line)
+                if match:
+                    try:
+                        line_time = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
+                        if line_time >= cutoff_time:
+                            cleaned_lines.append(line)
+                            kept_count += 1
+                        else:
+                            removed_count += 1
+                    except ValueError:
+                        # 时间解析失败，保留该行（防止误删）
+                        cleaned_lines.append(line)
+                        kept_count += 1
+                else:
+                    # 格式不匹配的行（如空行、标题行）保留
+                    cleaned_lines.append(line)
+                    kept_count += 1
+
+            # 如果有删除，重写文件
+            if removed_count > 0:
+                with open(log_file, "w", encoding="utf-8") as f:
+                    f.writelines(cleaned_lines)
+                total_cleaned += removed_count
+                total_files += 1
+                log.info(f"📝 清理文件: {log_file.name} | 删除 {removed_count} 行, 保留 {kept_count} 行")
+            else:
+                log.debug(f"✅ 文件无需清理: {log_file.name} (共 {kept_count} 行)")
+
+        except Exception as e:
+            log.error(f"处理文件 {log_file} 失败: {e}")
+
+    log.info(f"✅ 日志清理完成！共处理 {len(ping_files)} 个文件，清理 {total_cleaned} 条过期记录")
+    return total_cleaned, total_files
+
+
 def start_modules():
     """启动后台模块"""
     log.info("Starting background modules...")
 
-    # 每 60 秒执行一次（接近 Go 的 1 分钟）
+    # 1. 每 60 秒执行一次 Ping 监控
     scheduler.add_job(
         lambda: asyncio.run(network_monitor_task()),
         IntervalTrigger(seconds=60),
@@ -172,5 +268,13 @@ def start_modules():
         replace_existing=True
     )
 
+    # 🆕 4. 每天凌晨5点清理超过10天的日志
+    scheduler.add_job(
+        clean_old_ping_logs,
+        CronTrigger(hour=5, minute=0),
+        id="clean_old_ping_logs",
+        replace_existing=True
+    )
+
     scheduler.start()
-    log.info("✅ All background tasks started (Ping + 5min sync + 2AM anomaly detection)")
+    log.info("✅ All background tasks started (Ping + 5min sync + 2AM anomaly detection + 5AM log cleanup)")

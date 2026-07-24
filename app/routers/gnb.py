@@ -28,7 +28,7 @@ class GnbResponse(BaseModel):
 stations_db = {}  # key: station_id, value: BaseStation
 
 
-@router.post("/")
+@router.post("")
 async def handler_add_gnb(station: BaseStation, rds: redis.Redis = Depends(get_redis)):
     """新增基站"""
     log.info(f"HandlerAddGnb: {station.station_id} - {station.ip} - {station.name}")
@@ -50,7 +50,7 @@ async def handler_add_gnb(station: BaseStation, rds: redis.Redis = Depends(get_r
     )
 
 
-@router.delete("/")
+@router.delete("")
 async def handler_del_gnb(
         station_id: int = Query(..., description="基站ID"),
         rds: redis.Redis = Depends(get_redis)
@@ -87,25 +87,59 @@ async def handler_del_gnb(
 @router.get("/list")
 async def handler_get_gnb_list(
         page: int = Query(1, ge=1, description="页码"),
-        page_size: int = Query(10, ge=1, le=100, description="每页数量")
+        page_size: int = Query(10, ge=1, le=100, description="每页数量"),
+        rds: redis.Redis = Depends(get_redis)
 ):
-    """批量查询基站（默认10条）"""
+    """批量查询基站（直接从Redis读取）"""
     log.debug(f"HandlerGetGnbList page={page}, size={page_size}")
 
-    items = list(stations_db.values())
-    total = len(items)
+    try:
+        # 1. 获取所有基站键
+        keys = rds.keys("bs:*")
 
-    start = (page - 1) * page_size
-    end = start + page_size
-    page_items = items[start:end]
+        if not keys:
+            return GnbResponse(
+                timeStamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                data={
+                    "list": [],
+                    "total": 0,
+                    "page": page,
+                    "page_size": page_size,
+                    "total_pages": 0
+                }
+            )
 
-    return GnbResponse(
-        timeStamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        data={
-            "list": page_items,
-            "total": total,
-            "page": page,
-            "page_size": page_size,
-            "total_pages": (total + page_size - 1) // page_size
-        }
-    )
+        # 2. 批量读取所有基站数据
+        stations = []
+        for key in keys:
+            station_data = rds.hgetall(key)
+            if station_data:
+                # 从键名提取 station_id
+                station_id = int(key.split(':')[1])
+                station = {
+                    "station_id": station_id,
+                    "ip": station_data.get("ip", ""),
+                    "name": station_data.get("name", ""),
+                    "region": station_data.get("region", "")
+                }
+                stations.append(station)
+
+        # 3. 分页处理
+        total = len(stations)
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_items = stations[start:end]
+
+        return GnbResponse(
+            timeStamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            data={
+                "list": page_items,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": (total + page_size - 1) // page_size if total > 0 else 0
+            }
+        )
+    except Exception as e:
+        log.error(f"查询基站列表失败: {e}")
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
