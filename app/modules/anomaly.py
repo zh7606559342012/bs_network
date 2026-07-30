@@ -1,13 +1,15 @@
 # app/modules/anomaly.py
 import re
 import math
+import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict
 from collections import defaultdict
 from app.core.logger import log
 from app.core.database import BaseStationCache, CacheMutex
-
+from app.modules.alarm import send_alarm
+from app.schemas.alarm import AlarmType, AlarmParam
 
 # ====================== 数据结构 ======================
 class HourlyRecord:
@@ -69,12 +71,44 @@ def detect_network_anomaly():
                 f"突变 {r.max_change_ratio:.1f}% | 连续失败 {r.continuous_fail_hours} 小时"
             )
 
+            _report_anomaly_alarm(r)
+
     log.info(
         f"异常检测完成！共检测 {len(results)} 个基站，发现 {alert_count} 个异常/关注，"
         f"耗时 {datetime.now() - start}"
     )
     save_anomaly_results(results)
 
+def _report_anomaly_alarm(r: AnomalyResult):
+    """把单个基站的异常结果上报给网管"""
+    try:
+        extra_para = [
+            AlarmParam(name="station_id", value=str(r.station_id)),
+            AlarmParam(name="anomaly_score", value=f"{r.anomaly_score:.1f}"),
+            AlarmParam(name="alert_level", value=r.alert_level),
+            AlarmParam(name="rtt_mean", value=f"{r.rtt_mean:.2f}"),
+            AlarmParam(name="baseline_rtt", value=f"{r.baseline_rtt:.2f}"),
+            AlarmParam(name="max_change_ratio", value=f"{r.max_change_ratio:.1f}"),
+            AlarmParam(name="continuous_fail_hours", value=str(r.continuous_fail_hours)),
+            AlarmParam(name="history_days", value=str(r.history_days)),
+        ]
+
+        # 这里的 alarm_id 对应你 AgwAlarmIdMap 里的值
+        alarm_id = "50004000"
+        alarm_identifier = f"bs location anomaly station:{r.station_id}"
+
+        asyncio.create_task(
+            send_alarm(
+                alarm_id=alarm_id,
+                alarm_type=AlarmType.GENERATE,
+                alarm_identifier=alarm_identifier,
+                extra_para=extra_para,
+                send_anyway=True
+            )
+        )
+        log.info(f"已强制提交基站 {r.station_id} 异常告警到上报队列")
+    except Exception as e:
+        log.error(f"上报基站 {r.station_id} 异常告警失败: {e}")
 
 # ====================== 核心计算逻辑 ======================
 def calculate_anomaly(raw_data: List[HourlyRecord]) -> List[AnomalyResult]:
@@ -295,7 +329,7 @@ def percentile_95(vals: List[float]) -> float:
 def save_anomaly_results(results: List[AnomalyResult]):
     log_dir = Path("/var/log/monitor_agent")
     log_dir.mkdir(parents=True, exist_ok=True)
-    filename = log_dir / f"anomaly_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+    filename = log_dir / f"anomaly_{datetime.now().strftime('%Y%m%d')}.csv"
 
     try:
         with open(filename, "w", encoding="utf-8") as f:
@@ -310,6 +344,22 @@ def save_anomaly_results(results: List[AnomalyResult]):
         log.info(f"检测结果已保存为 {filename}")
     except Exception as e:
         log.error(f"保存异常结果失败: {e}")
+
+    # 清理过期文件（只保留最近 keep_days 天）
+    try:
+        cutoff = datetime.now() - timedelta(days=30)
+        for f in log_dir.glob("anomaly_*.csv"):
+            try:
+                # 从文件名解析日期
+                date_str = f.stem.split("_")[1]  # anomaly_20260730
+                file_date = datetime.strptime(date_str, "%Y%m%d")
+                if file_date < cutoff:
+                    f.unlink()
+                    log.info(f"已删除过期文件: {f.name}")
+            except Exception:
+                continue
+    except Exception as e:
+        log.warning(f"清理历史 anomaly 文件失败: {e}")
 
 
 # ====================== 日志解析 ======================

@@ -2,6 +2,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
 from app.modules.anomaly import detect_network_anomaly
+from app.modules.alarm import handler_alarm, init_alarm_maps
 import re
 from datetime import datetime, timedelta
 import json
@@ -18,6 +19,7 @@ from app.core.database import (
 import redis
 
 scheduler = BackgroundScheduler()
+
 
 
 async def ping_base_station(station):
@@ -243,6 +245,12 @@ def clean_old_ping_logs():
 def start_modules():
     """启动后台模块"""
     log.info("Starting background modules...")
+
+    # 1. 先初始化映射表
+    init_alarm_maps()
+
+    # 2. 启动告警处理协程
+    asyncio.create_task(handler_alarm())
 
     # 1. 每 60 秒执行一次 Ping 监控
     scheduler.add_job(
