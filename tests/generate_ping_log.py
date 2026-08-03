@@ -12,35 +12,33 @@ from pathlib import Path
 
 
 def generate_ping_logs(
-        start_time: str = "2026-07-13 00:00:00",
-        days: int = 12,
-        interval_seconds: int = 60,  # 每分钟一条
+        days: int = 10,                    # 生成最近多少天的数据
+        interval_seconds: int = 60,        # 每分钟一条
         start_seq: int = 1,
-        output_file: str = "ping_17216123201.log",  # 可改成实际IP对应的文件名
-        fail_rate: float = 0.02  # 2% 的失败率
+        output_file: str = "ping_17216123201.log",
+        fail_rate: float = 0.02            # 2% 的失败率
 ):
     """
     生成模拟 Ping 日志
+    默认从当前时间往前推 days 天开始
     """
-    start = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
-    end = start + timedelta(days=days)
+    # 关键改动：根据当前时间自动计算起始时间
+    end = datetime.now().replace(second=0, microsecond=0)  # 对齐到整分钟
+    start = end - timedelta(days=days)
 
     current = start
     seq = start_seq
-
     lines = []
 
-    while current < end:
-        # 随机生成 RTT（正常情况 0.8 ~ 2.5 ms）
+    while current <= end:  # 包含当前这一分钟
+        # 随机生成 RTT
         if random.random() < fail_rate:
             status = "FAIL"
             rtt = 0.00
         else:
             status = "OK"
-            # 模拟正常延迟分布
             rtt = round(random.uniform(0.25, 2.80), 2)
 
-        # 格式化输出
         line = (
             f"{current.strftime('%Y-%m-%d %H:%M:%S')} | "
             f"seq={seq:06d} | "
@@ -49,7 +47,6 @@ def generate_ping_logs(
         )
         lines.append(line)
 
-        # 下一条
         current += timedelta(seconds=interval_seconds)
         seq += 1
 
@@ -70,10 +67,9 @@ def generate_ping_logs(
 if __name__ == "__main__":
     # ==================== 可修改参数 ====================
     generate_ping_logs(
-        start_time="2026-07-13 00:00:00",  # 起始时间
-        days=12,  # 生成多少天
-        interval_seconds=60,  # 间隔（秒），60=每分钟一条
-        start_seq=1,  # 起始序号
-        output_file="ping_17216123201.log",  # 输出文件名（建议用 IP 去掉点）
-        fail_rate=0.015  # 失败比例（1.5%）
+        days=10,                           # 生成当前时间往前10天的数据
+        interval_seconds=60,               # 间隔（秒），60=每分钟一条
+        start_seq=1,                       # 起始序号
+        output_file="ping_17216123201.log",# 输出文件名
+        fail_rate=0.015                    # 失败比例（1.5%）
     )
