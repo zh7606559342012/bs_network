@@ -15,7 +15,7 @@ def generate_ping_logs(
         days: int = 10,                    # 生成最近多少天的数据
         interval_seconds: int = 60,        # 每分钟一条
         start_seq: int = 1,
-        output_file: str = "ping_17216123201.log",
+        output_file: str = "ping_17216123202.log",
         fail_rate: float = 0.02            # 2% 的失败率
 ):
     """
@@ -70,6 +70,6 @@ if __name__ == "__main__":
         days=10,                           # 生成当前时间往前10天的数据
         interval_seconds=60,               # 间隔（秒），60=每分钟一条
         start_seq=1,                       # 起始序号
-        output_file="ping_17216123201.log",# 输出文件名
+        output_file="ping_17216123202.log",# 输出文件名
         fail_rate=0.015                    # 失败比例（1.5%）
     )

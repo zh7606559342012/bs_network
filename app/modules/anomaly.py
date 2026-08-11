@@ -216,8 +216,8 @@ def compute_single_station(
         if not history.empty else {}
     )
 
-    AnomalyThreshold = 70.0
-    WarningThreshold = 50.0
+    AnomalyThreshold = 60.0
+    WarningThreshold = 40.0
     ChangeThreshold = 0.30
     weights = {"rtt_mean": 0.30, "rtt_p95": 0.25, "loss_rate": 0.45}
 
@@ -322,10 +322,8 @@ def compute_single_station(
     base_vals = history.loc[history["ok_count"] > 0, "rtt_mean"]
     baseline = float(base_vals.mean()) if len(base_vals) else 0.0
 
-    if max_change > ChangeThreshold and score >= WarningThreshold:
+    if max_change > ChangeThreshold and score >= AnomalyThreshold:
         alert = "🚨 重大突变"
-    elif score >= AnomalyThreshold:
-        alert = "⚠️ 告警"
     elif score >= WarningThreshold:
         alert = "⚠️ 关注"
     else:
@@ -440,29 +438,45 @@ def parse_log_file(filename: str, station_id: int, cutoff: datetime) -> pd.DataF
     if not path.exists():
         return pd.DataFrame(columns=["station_id", "timestamp", "rtt", "is_ok"])
 
+    # status 后允许 OK/FAIL；rtt 允许数字或 - (timeout/...)
     pattern = re.compile(
-        r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*\|\s*seq=\d+\s*\|\s*(\w+)\s*\|\s*rtt=([\d.]+)\s*ms"
+        r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*\|\s*seq=\d+\s*\|\s*(\w+)\s*\|\s*rtt=(.+)$"
     )
     rows = []
     try:
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
+                line = line.strip()
+                if not line:
+                    continue
                 m = pattern.search(line)
                 if not m:
                     continue
-                ts_str, status, rtt_str = m.groups()
+                ts_str, status, rtt_raw = m.groups()
                 try:
                     ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
                 except ValueError:
                     continue
                 if ts < cutoff:
                     continue
-                rows.append((station_id, ts, float(rtt_str), status.upper() == "OK"))
+
+                status_u = status.strip().upper()
+                is_ok = status_u == "OK"
+
+                # 解析 rtt：数字则取值，否则 0
+                rtt_raw = rtt_raw.strip()
+                m_rtt = re.match(r"([\d.]+)", rtt_raw)
+                if m_rtt and is_ok:
+                    rtt = float(m_rtt.group(1))
+                else:
+                    rtt = 0.0
+                    is_ok = False  # 无有效 rtt 一律当失败
+
+                rows.append((station_id, ts, rtt, is_ok))
     except Exception as e:
         log.warning(f"解析日志文件失败 {filename}: {e}")
         return pd.DataFrame(columns=["station_id", "timestamp", "rtt", "is_ok"])
 
     if not rows:
         return pd.DataFrame(columns=["station_id", "timestamp", "rtt", "is_ok"])
-
     return pd.DataFrame(rows, columns=["station_id", "timestamp", "rtt", "is_ok"])
