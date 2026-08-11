@@ -1,220 +1,282 @@
+#!/usr/bin/env python
 # tests/test_anomaly_calc.py
+"""
+不依赖 pytest 的纯 Python 单元测试
+运行方式（在项目根目录）：
+    python tests/test_anomaly_calc.py
+"""
 import sys
+import tempfile
+import traceback
 from pathlib import Path
 from datetime import datetime, timedelta
-from unittest.mock import patch
 
-project_root = Path(__file__).parent.parent
+# 添加项目根目录到 Python 路径
+project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
 from app.modules.anomaly import (
-    parse_log_file,
-    fetch_last_n_days_data,
-    calculate_anomaly,
-    aggregate_to_daily,
+    HourlyRecord,
+    aggregate_to_hourly,
     compute_single_station,
-    AnomalyResult,
+    check_continuous_fail,
+    parse_log_file,
+    mean,
+    std_dev,
+    percentile_95,
 )
 
+# =========================================================
+# 工具：生成合成数据
+# =========================================================
+def make_records(
+    station_id: int,
+    start: datetime,
+    days: int = 5,
+    hours_per_day=range(0, 24),
+    base_rtt: float = 2.0,
+    loss_rate: float = 0.0,
+    rtt_spike_hour=None,
+    spike_day_offset=None,
+    continuous_fail_last_n: int = 0,
+):
+    """每小时生成 4 条 ping（模拟分钟级数据）"""
+    records = []
+    seq = 0
+    total_hours = days * 24
+    for d in range(days):
+        for h in hours_per_day:
+            ts_base = start + timedelta(days=d, hours=h)
+            is_spike = (
+                spike_day_offset is not None
+                and d == spike_day_offset
+                and h == rtt_spike_hour
+            )
+            hours_from_end = total_hours - (d * 24 + h)
+            force_fail = continuous_fail_last_n > 0 and hours_from_end <= continuous_fail_last_n
 
-# 你的测试日志对应的 IP（去掉点号后就是文件名）
-TEST_IP = "172.16.123.201"
-TEST_STATION_ID = 10001
-LOG_FILE = Path("/var/log/monitor_agent") / f"ping_{TEST_IP.replace('.', '')}.log"
-
-
-def test_parse_log_file():
-    """测试1：日志解析是否正常"""
-    print("\n" + "=" * 60)
-    print("【测试1】解析日志文件")
-    print("=" * 60)
-
-    if not LOG_FILE.exists():
-        print(f"❌ 日志文件不存在: {LOG_FILE}")
-        print("请确认路径和文件名是否正确")
-        return None
-
-    cutoff = datetime.now() - timedelta(days=10)
-    records = parse_log_file(str(LOG_FILE), TEST_STATION_ID, cutoff)
-
-    print(f"日志文件: {LOG_FILE}")
-    print(f"解析到记录数: {len(records)}")
-
-    if not records:
-        print("❌ 没有解析到任何记录，请检查日志格式和正则")
-        return None
-
-    # 打印前几条和后几条
-    print("\n前 5 条记录:")
-    for r in records[:5]:
-        print(f"  {r.timestamp} | ok={r.is_ok} | rtt={r.rtt}")
-
-    print("\n后 5 条记录:")
-    for r in records[-5:]:
-        print(f"  {r.timestamp} | ok={r.is_ok} | rtt={r.rtt}")
-
-    ok_count = sum(1 for r in records if r.is_ok)
-    fail_count = len(records) - ok_count
-    print(f"\n统计: 总计={len(records)}, OK={ok_count}, FAIL={fail_count}")
-
-    assert len(records) > 0
-    print("✅ 日志解析通过")
+            for m in (0, 15, 30, 45):
+                seq += 1
+                ts = ts_base.replace(minute=m, second=0, microsecond=0)
+                if force_fail:
+                    ok = False
+                    rtt = 0.0
+                else:
+                    ok = (seq % 100) >= int(loss_rate * 100)
+                    if is_spike and ok:
+                        rtt = base_rtt * 5.0
+                    else:
+                        rtt = base_rtt + (seq % 5) * 0.1
+                records.append(
+                    HourlyRecord(
+                        station_id=station_id,
+                        timestamp=ts,
+                        rtt=rtt,
+                        is_ok=ok,
+                    )
+                )
     return records
 
+# =========================================================
+# 简单测试运行器
+# =========================================================
+_passed = 0
+_failed = 0
 
-def test_aggregate_and_calc(records):
-    """测试2：按天聚合 + 异常计算"""
-    print("\n" + "=" * 60)
-    print("【测试2】按天聚合 & 异常分数计算")
-    print("=" * 60)
+def run_test(name, func):
+    global _passed, _failed
+    try:
+        func()
+        print(f"  ✅ PASS  {name}")
+        _passed += 1
+    except Exception as e:
+        print(f"  ❌ FAIL  {name}")
+        print(f"         {type(e).__name__}: {e}")
+        traceback.print_exc()
+        _failed += 1
 
-    if not records:
-        print("跳过：没有 records")
-        return
+# =========================================================
+# 1. 基础统计函数
+# =========================================================
+def test_mean_std_percentile():
+    assert mean([]) == 0.0
+    assert mean([1, 2, 3]) == 2.0
+    assert abs(std_dev([1, 2, 3]) - 1.0) < 1e-6
+    assert std_dev([5]) == 0.0
+    assert percentile_95([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) >= 9
 
-    # 1. 按天聚合
-    daily_map = aggregate_to_daily(records)
-    days = daily_map.get(TEST_STATION_ID, [])
+# =========================================================
+# 2. 小时聚合
+# =========================================================
+def test_aggregate_to_hourly_basic():
+    start = datetime(2026, 7, 20, 0, 0, 0)
+    records = make_records(station_id=101, start=start, days=2, base_rtt=2.0)
+    hourly_map = aggregate_to_hourly(records)
+    assert 101 in hourly_map
+    hours = hourly_map[101]
+    assert len(hours) == 48  # 2天 * 24小时
+    h0 = hours[0]
+    assert h0.station_id == 101
+    assert h0.total_count == 4
+    assert h0.ok_count == 4
+    assert h0.loss_rate == 0.0
+    assert abs(h0.rtt_mean - 2.0) < 1.0
 
-    print(f"聚合后天数: {len(days)}")
-    print("\n每日汇总:")
-    for d in days:
-        print(
-            f"  {d.date.strftime('%Y-%m-%d')} | "
-            f"rtt_mean={d.rtt_mean:.2f} | "
-            f"rtt_p95={d.rtt_p95:.2f} | "
-            f"loss_rate={d.loss_rate:.2%} | "
-            f"hours={d.hour_count}"
-        )
+def test_aggregate_with_loss():
+    start = datetime(2026, 7, 20, 0, 0, 0)
+    records = make_records(
+        station_id=102, start=start, days=1,
+        hours_per_day=range(0, 1), loss_rate=0.5
+    )
+    hourly_map = aggregate_to_hourly(records)
+    h = hourly_map[102][0]
+    assert 0.4 <= h.loss_rate <= 0.6
 
-    # 2. 计算异常
-    result = compute_single_station(TEST_STATION_ID, days, records)
+# =========================================================
+# 3. 正常情况：历史足够，当前无异常 → 分数应较低
+# =========================================================
+def test_compute_normal_low_score():
+    start = datetime(2026, 7, 20, 0, 0, 0)
+    records = make_records(station_id=201, start=start, days=5, base_rtt=2.0)
+    hourly_map = aggregate_to_hourly(records)
+    result = compute_single_station(201, hourly_map[201], records)
 
-    print("\n" + "-" * 40)
-    print("异常计算结果:")
-    print(f"  station_id           : {result.station_id}")
-    print(f"  date                 : {result.date}")
-    print(f"  anomaly_score        : {result.anomaly_score}")
-    print(f"  alert_level          : {result.alert_level}")
-    print(f"  rtt_mean             : {result.rtt_mean}")
-    print(f"  baseline_rtt         : {result.baseline_rtt}")
-    print(f"  max_change_ratio     : {result.max_change_ratio}%")
-    print(f"  loss_contrib         : {result.loss_contrib}")
-    print(f"  continuous_fail_hours: {result.continuous_fail_hours}")
-    print(f"  history_days         : {result.history_days}")
-    print(f"  data_points          : {result.data_points}")
-    print("-" * 40)
+    assert result.station_id == 201
+    assert result.history_days >= 3
+    assert result.anomaly_score < 50, f"正常数据分数应 <50，实际 {result.anomaly_score}"
+    assert result.alert_level == "正常"
+    assert result.continuous_fail_hours == 0
 
-    # 基本断言：有结果就算跑通
-    assert result.station_id == TEST_STATION_ID
-    assert result.anomaly_score >= 0
-    print("✅ 异常计算通过")
-    return result
+# =========================================================
+# 4. 突变场景：最新一天某小时 RTT 暴涨 → 应触发高分
+# =========================================================
+def test_compute_rtt_spike_high_score():
+    start = datetime(2026, 7, 20, 0, 0, 0)
+    records = make_records(
+        station_id=202,
+        start=start,
+        days=5,
+        base_rtt=2.0,
+        rtt_spike_hour=14,
+        spike_day_offset=4,
+    )
+    hourly_map = aggregate_to_hourly(records)
+    result = compute_single_station(202, hourly_map[202], records)
 
+    print(f"         [spike] score={result.anomaly_score}, level={result.alert_level}, "
+          f"change={result.max_change_ratio}%, rtt={result.rtt_mean}")
 
-def test_full_pipeline_with_mock_cache():
-    """测试3：完整流程（Mock 基站缓存，走 fetch_last_n_days_data）"""
-    print("\n" + "=" * 60)
-    print("【测试3】完整流程（Mock BaseStationCache）")
-    print("=" * 60)
+    assert result.history_days >= 3
+    assert result.anomaly_score >= 50, f"RTT突变应 >=50，实际 {result.anomaly_score}"
+    assert result.max_change_ratio > 30
 
-    # Mock 缓存：让 fetch_last_n_days_data 能找到你的日志
-    fake_cache = {
-        TEST_STATION_ID: {
-            "ip": TEST_IP,
-            "name": "test-bs-001",
-            "station_id": TEST_STATION_ID,
-        }
-    }
+# =========================================================
+# 5. 连续 12 小时不通 → 强制 100 分
+# =========================================================
+def test_continuous_fail_12h():
+    now = datetime.now().replace(minute=0, second=0, microsecond=0)
 
-    with patch("app.modules.anomaly.BaseStationCache", fake_cache):
-        with patch("app.modules.anomaly.CacheMutex"):
-            records = fetch_last_n_days_data(days=10)
-            print(f"fetch_last_n_days_data 返回记录数: {len(records)}")
+    # 最近 15 小时数据：前 3 小时正常，后 12 小时全失败
+    recent_records = []
+    for i in range(15):
+        ts = now - timedelta(hours=14 - i)
+        is_fail = i >= 3
+        for m in (0, 15, 30, 45):
+            recent_records.append(
+                HourlyRecord(
+                    station_id=203,
+                    timestamp=ts.replace(minute=m),
+                    rtt=0.0 if is_fail else 2.0,
+                    is_ok=not is_fail,
+                )
+            )
 
-            if not records:
-                print("❌ 完整流程没有读到数据")
-                return
+    fail_hours = check_continuous_fail(203, recent_records, hours=12)
+    assert fail_hours >= 12, f"应检测到 >=12 小时连续失败，实际 {fail_hours}"
 
-            results = calculate_anomaly(records)
-            print(f"calculate_anomaly 返回基站数: {len(results)}")
-
-            for r in results:
-                print(
-                    f"  基站 {r.station_id} | score={r.anomaly_score:.1f} | "
-                    f"{r.alert_level} | RTT={r.rtt_mean:.2f} | "
-                    f"连续失败={r.continuous_fail_hours}h"
+    # 补 4 天历史正常数据
+    hist = []
+    for d in range(1, 5):
+        for h in range(24):
+            ts = now - timedelta(days=d, hours=h)
+            for m in (0, 15, 30, 45):
+                hist.append(
+                    HourlyRecord(
+                        station_id=203,
+                        timestamp=ts.replace(minute=m),
+                        rtt=2.0,
+                        is_ok=True,
+                    )
                 )
 
-                # 如果分数高，看看是否会触发告警条件
-                if r.anomaly_score >= 50 or r.continuous_fail_hours >= 12:
-                    print(f"  >>> 该基站会触发告警上报")
+    all_recs = hist + recent_records
+    hourly_map = aggregate_to_hourly(all_recs)
+    result = compute_single_station(203, hourly_map[203], all_recs)
 
-            print("✅ 完整流程通过")
+    assert result.anomaly_score == 100.0
+    assert "连续12小时不通" in result.alert_level
+    assert result.continuous_fail_hours >= 12
 
+# =========================================================
+# 6. 历史不足 → 数据不足
+# =========================================================
+def test_insufficient_history():
+    start = datetime(2026, 7, 25, 0, 0, 0)
+    records = make_records(station_id=204, start=start, days=2, base_rtt=2.0)
+    hourly_map = aggregate_to_hourly(records)
+    result = compute_single_station(204, hourly_map[204], records)
 
-def test_anomaly_with_injected_spike():
-    """测试4：人为制造异常，验证算法能否检测出来"""
-    print("\n" + "=" * 60)
-    print("【测试4】人为注入异常数据，验证检测能力")
-    print("=" * 60)
+    assert result.anomaly_score == 0.0
+    assert "数据不足" in result.alert_level
+    assert result.history_days < 3
 
-    from app.modules.anomaly import HourlyRecord
+# =========================================================
+# 7. 日志解析（用你真实格式，写临时文件）
+# =========================================================
+def test_parse_log_file_format():
+    log_content = (
+        "2026-07-26 11:10:00 | seq=000001 | OK | rtt=0.29 ms\n"
+        "2026-07-26 11:11:00 | seq=000002 | OK | rtt=1.50 ms\n"
+        "2026-07-26 11:12:00 | seq=000003 | OK | rtt=0.75 ms\n"
+        "2026-07-26 11:13:00 | seq=000004 | FAIL | rtt=0.00 ms\n"
+        "2026-07-26 11:14:00 | seq=000005 | OK | rtt=1.69 ms\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        log_file = Path(tmp) / "ping_17216123201.log"
+        log_file.write_text(log_content, encoding="utf-8")
 
-    now = datetime.now().replace(minute=0, second=0, microsecond=0)
-    records = []
+        cutoff = datetime(2026, 7, 26, 0, 0, 0)
+        records = parse_log_file(str(log_file), station_id=999, cutoff=cutoff)
 
-    # 前 6 天：正常 RTT ~20ms，偶尔失败
-    for day in range(6, 0, -1):
-        day_start = now - timedelta(days=day)
-        for hour in range(24):
-            ts = day_start.replace(hour=hour)
-            # 大部分 OK
-            is_ok = hour % 10 != 0
-            rtt = 20.0 + (hour % 5) if is_ok else 0.0
-            records.append(HourlyRecord(TEST_STATION_ID, ts, rtt, is_ok))
+        assert len(records) == 5
+        assert records[0].is_ok is True
+        assert abs(records[0].rtt - 0.29) < 1e-6
+        assert records[3].is_ok is False
+        assert records[3].rtt == 0.0
 
-    # 今天：RTT 突然飙到 200ms，丢包很高
-    for hour in range(24):
-        ts = now.replace(hour=hour)
-        is_ok = hour % 3 != 0  # 更高失败率
-        rtt = 200.0 if is_ok else 0.0
-        records.append(HourlyRecord(TEST_STATION_ID, ts, rtt, is_ok))
-
-    results = calculate_anomaly(records)
-    assert len(results) == 1
-    r = results[0]
-
-    print(f"注入异常后计算结果:")
-    print(f"  score       = {r.anomaly_score}")
-    print(f"  alert_level = {r.alert_level}")
-    print(f"  rtt_mean    = {r.rtt_mean}")
-    print(f"  baseline    = {r.baseline_rtt}")
-    print(f"  change%     = {r.max_change_ratio}")
-
-    # 期望能检测出异常
-    if r.anomaly_score >= 50:
-        print("✅ 成功检测出人为注入的异常")
-    else:
-        print(f"⚠️ 分数只有 {r.anomaly_score}，可能阈值需要再调")
-
-
+# =========================================================
+# 主入口
+# =========================================================
 if __name__ == "__main__":
-    print("🚀 基站网络异常检测 - 计算逻辑测试")
+    print("=" * 60)
+    print("开始运行 anomaly 核心逻辑测试（无 pytest）")
     print("=" * 60)
 
-    # 测试1：解析真实日志
-    records = test_parse_log_file()
+    run_test("test_mean_std_percentile", test_mean_std_percentile)
+    run_test("test_aggregate_to_hourly_basic", test_aggregate_to_hourly_basic)
+    run_test("test_aggregate_with_loss", test_aggregate_with_loss)
+    run_test("test_compute_normal_low_score", test_compute_normal_low_score)
+    run_test("test_compute_rtt_spike_high_score", test_compute_rtt_spike_high_score)
+    run_test("test_continuous_fail_12h", test_continuous_fail_12h)
+    run_test("test_insufficient_history", test_insufficient_history)
+    run_test("test_parse_log_file_format", test_parse_log_file_format)
 
-    # 测试2：用真实日志做聚合和计算
-    if records:
-        test_aggregate_and_calc(records)
+    print("=" * 60)
+    print(f"结果: {_passed} 通过, {_failed} 失败")
+    print("=" * 60)
 
-    # 测试3：走完整 fetch 流程
-    test_full_pipeline_with_mock_cache()
-
-    # 测试4：人为异常验证算法敏感度
-    test_anomaly_with_injected_spike()
-
-    print("\n" + "=" * 60)
-    print("全部测试结束")
+    if _failed > 0:
+        sys.exit(1)
+    else:
+        print("全部通过 ✅")
+        sys.exit(0)

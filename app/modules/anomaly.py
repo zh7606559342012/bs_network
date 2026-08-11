@@ -2,37 +2,19 @@
 import re
 import math
 import asyncio
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Dict, Optional
-from collections import defaultdict
+from typing import List, Optional
+
+import pandas as pd
+import numpy as np
+
 from app.core.logger import log
 from app.core.database import BaseStationCache, CacheMutex
 from app.modules.alarm import send_alarm
 from app.schemas.alarm import AlarmType, AlarmParam
 
-# ====================== 数据结构 ======================
-class HourlyRecord:
-    """原始 ping 记录（分钟/秒级）"""
-    def __init__(self, station_id: int, timestamp: datetime, rtt: float, is_ok: bool):
-        self.station_id = station_id
-        self.timestamp = timestamp
-        self.rtt = rtt
-        self.is_ok = is_ok
-
-class HourlyAggregate:
-    """按小时聚合后的数据"""
-    def __init__(self, station_id: int, hour: datetime,
-                 rtt_mean: float, rtt_p95: float,
-                 total_count: int, ok_count: int, loss_rate: float):
-        self.station_id = station_id
-        self.hour = hour                  # 整点 datetime
-        self.rtt_mean = rtt_mean
-        self.rtt_p95 = rtt_p95            # 本小时最大 RTT（兼容原逻辑）
-        self.total_count = total_count
-        self.ok_count = ok_count
-        self.loss_rate = loss_rate        # 0.0 ~ 1.0
-
+# ====================== 结果对象（上报/落盘仍用） ======================
 class AnomalyResult:
     def __init__(self, **kwargs):
         self.station_id = kwargs.get("station_id")
@@ -53,12 +35,14 @@ class AnomalyResult:
 def detect_network_anomaly():
     """每天凌晨2点执行基站网络异常检测（小时级同小时对比）"""
     start = datetime.now()
-    log.info("=== 开始执行基站网络异常检测任务（小时级同小时历史均值/标准差 + 丢包率） ===")
-    raw_data = fetch_last_n_days_data(days=7)
-    if not raw_data:
+    log.info("=== 开始执行基站网络异常检测任务（pandas + 小时级同小时对比） ===")
+
+    df = fetch_last_n_days_data(days=7)
+    if df is None or df.empty:
         log.warning("未找到任何日志数据，跳过检测")
         return
-    results = calculate_anomaly(raw_data)
+
+    results = calculate_anomaly(df)
     alert_count = 0
     for r in results:
         if r.anomaly_score >= 50 or r.continuous_fail_hours >= 12:
@@ -69,6 +53,7 @@ def detect_network_anomaly():
                 f"突变 {r.max_change_ratio:.1f}% | 连续失败 {r.continuous_fail_hours} 小时"
             )
             _report_anomaly_alarm(r)
+
     log.info(
         f"异常检测完成！共检测 {len(results)} 个基站，发现 {alert_count} 个异常/关注，"
         f"耗时 {datetime.now() - start}"
@@ -76,7 +61,6 @@ def detect_network_anomaly():
     save_anomaly_results(results)
 
 def _report_anomaly_alarm(r: AnomalyResult):
-    """把单个基站的异常结果上报给网管"""
     try:
         extra_para = [
             AlarmParam(name="station_id", value=str(r.station_id)),
@@ -96,94 +80,120 @@ def _report_anomaly_alarm(r: AnomalyResult):
                 alarm_type=AlarmType.GENERATE,
                 alarm_identifier=alarm_identifier,
                 extra_para=extra_para,
-                send_anyway=True
+                send_anyway=True,
             )
         )
         log.info(f"已强制提交基站 {r.station_id} 异常告警到上报队列")
     except Exception as e:
         log.error(f"上报基站 {r.station_id} 异常告警失败: {e}")
 
-# ====================== 核心计算逻辑 ======================
-def calculate_anomaly(raw_data: List[HourlyRecord]) -> List[AnomalyResult]:
-    hourly_map = aggregate_to_hourly(raw_data)
+# ====================== 核心计算 ======================
+def calculate_anomaly(df: pd.DataFrame) -> List[AnomalyResult]:
+    """
+    df 列: station_id, timestamp, rtt, is_ok
+    """
+    hourly = aggregate_to_hourly(df)
     results = []
-    for station_id, hours in hourly_map.items():
-        if not hours:
-            continue
-        res = compute_single_station(station_id, hours, raw_data)
+    for station_id, g in hourly.groupby("station_id", sort=False):
+        res = compute_single_station(int(station_id), g, df)
         results.append(res)
     results.sort(key=lambda x: x.anomaly_score, reverse=True)
     return results
 
-def aggregate_to_hourly(records: List[HourlyRecord]) -> Dict[int, List[HourlyAggregate]]:
-    """把分钟/秒级 ping 记录聚合到小时级"""
-    hourly_map = defaultdict(lambda: defaultdict(lambda: {
-        "rtt_sum": 0.0,
-        "rtt_max": 0.0,
-        "ok_count": 0,
-        "total_count": 0,
-        "hour": None
-    }))
+def aggregate_to_hourly(df: pd.DataFrame) -> pd.DataFrame:
+    """分钟级 → 小时级聚合；rtt_p95 为真实 95 分位（样本不足时回退 max）"""
+    if df.empty:
+        return pd.DataFrame(columns=[
+            "station_id", "hour", "rtt_mean", "rtt_p95",
+            "total_count", "ok_count", "loss_rate"
+        ])
 
-    for r in records:
-        hour_key = r.timestamp.replace(minute=0, second=0, microsecond=0)
-        d = hourly_map[r.station_id][hour_key]
-        d["total_count"] += 1
-        if r.is_ok and r.rtt > 0:
-            d["ok_count"] += 1
-            d["rtt_sum"] += r.rtt
-            d["rtt_max"] = max(d["rtt_max"], r.rtt)
-        if d["hour"] is None:
-            d["hour"] = hour_key
+    work = df.copy()
+    work["hour"] = work["timestamp"].dt.floor("h")
 
-    result = {}
-    for sid, hour_dict in hourly_map.items():
-        lst = []
-        for _, d in hour_dict.items():
-            if d["total_count"] == 0:
-                continue
-            loss_rate = 1.0 - (d["ok_count"] / d["total_count"])
-            rtt_mean = d["rtt_sum"] / d["ok_count"] if d["ok_count"] > 0 else 0.0
-            lst.append(HourlyAggregate(
-                station_id=sid,
-                hour=d["hour"],
-                rtt_mean=rtt_mean,
-                rtt_p95=d["rtt_max"],
-                total_count=d["total_count"],
-                ok_count=d["ok_count"],
-                loss_rate=loss_rate
-            ))
-        lst.sort(key=lambda x: x.hour)
-        result[sid] = lst
-    return result
+    # 每小时总次数
+    total = (
+        work.groupby(["station_id", "hour"], as_index=False)
+        .size()
+        .rename(columns={"size": "total_count"})
+    )
 
-def compute_single_station(station_id: int, hours: List[HourlyAggregate],
-                           all_records: List[HourlyRecord]) -> AnomalyResult:
-    if not hours:
+    # 成功样本（is_ok 且 rtt > 0）
+    ok_mask = work["is_ok"] & (work["rtt"] > 0)
+    ok_df = work.loc[ok_mask]
+
+    def _safe_p95(s: pd.Series) -> float:
+        """样本 < 5 时用 max，否则用真实 95 分位"""
+        n = len(s)
+        if n == 0:
+            return 0.0
+        if n < 5:
+            return float(s.max())
+        return float(np.percentile(s.to_numpy(dtype=float), 95))
+
+    if ok_df.empty:
+        ok_stats = pd.DataFrame(
+            columns=["station_id", "hour", "ok_count", "rtt_mean", "rtt_p95"]
+        )
+    else:
+        ok_stats = (
+            ok_df.groupby(["station_id", "hour"], as_index=False)
+            .agg(
+                ok_count=("rtt", "size"),
+                rtt_mean=("rtt", "mean"),
+                rtt_p95=("rtt", _safe_p95),
+            )
+        )
+
+    hourly = total.merge(ok_stats, on=["station_id", "hour"], how="left")
+    hourly["ok_count"] = hourly["ok_count"].fillna(0).astype(int)
+    hourly["rtt_mean"] = hourly["rtt_mean"].fillna(0.0)
+    hourly["rtt_p95"] = hourly["rtt_p95"].fillna(0.0)
+    hourly["loss_rate"] = 1.0 - (
+        hourly["ok_count"] / hourly["total_count"].clip(lower=1)
+    )
+    hourly = hourly.sort_values(["station_id", "hour"]).reset_index(drop=True)
+    return hourly
+
+def compute_single_station(
+    station_id: int,
+    hourly: pd.DataFrame,
+    all_df: pd.DataFrame,
+) -> AnomalyResult:
+    """
+    hourly: 该基站的小时聚合表
+    all_df: 原始 ping（用于连续失败检测）
+    """
+    if hourly.empty:
         return AnomalyResult(station_id=station_id, anomaly_score=0.0, alert_level="无数据")
 
-    # 按日期拆分：最新一天 vs 历史
-    all_dates = sorted({h.hour.date() for h in hours})
+    hourly = hourly.copy()
+    hourly["date"] = hourly["hour"].dt.date
+    all_dates = sorted(hourly["date"].unique())
     latest_date = all_dates[-1]
-    current_hours = [h for h in hours if h.hour.date() == latest_date]
-    history_hours = [h for h in hours if h.hour.date() < latest_date]
-    unique_hist_days = len({h.hour.date() for h in history_hours})
 
-    # 数据不足（历史不足 3 天）
+    current = hourly[hourly["date"] == latest_date].copy()
+    history = hourly[hourly["date"] < latest_date].copy()
+    unique_hist_days = history["date"].nunique()
+
+    def _cur_rtt():
+        vals = current.loc[current["ok_count"] > 0, "rtt_mean"]
+        return float(vals.mean()) if len(vals) else 0.0
+
+    # 历史不足 3 天
     if unique_hist_days < 3:
-        cur_rtt = mean([h.rtt_mean for h in current_hours if h.ok_count > 0]) if current_hours else 0.0
         return AnomalyResult(
             station_id=station_id,
             date=latest_date.strftime("%Y-%m-%d"),
             anomaly_score=0.0,
             alert_level="数据不足",
-            rtt_mean=round(cur_rtt, 2),
-            data_points=sum(h.total_count for h in current_hours),
-            history_days=unique_hist_days
+            rtt_mean=round(_cur_rtt(), 2),
+            data_points=int(current["total_count"].sum()),
+            history_days=int(unique_hist_days),
         )
 
-    # ========== 连续 12 小时不通检测（优先级最高） ==========
-    continuous_fail = check_continuous_fail(station_id, all_records, hours=12)
+    # 连续 12 小时不通
+    continuous_fail = check_continuous_fail(station_id, all_df, hours=12)
     if continuous_fail >= 12:
         return AnomalyResult(
             station_id=station_id,
@@ -193,103 +203,125 @@ def compute_single_station(station_id: int, hours: List[HourlyAggregate],
             rtt_mean=0.0,
             baseline_rtt=0.0,
             max_change_ratio=100.0,
-            data_points=sum(h.total_count for h in current_hours),
-            history_days=unique_hist_days,
-            continuous_fail_hours=continuous_fail
+            data_points=int(current["total_count"].sum()),
+            history_days=int(unique_hist_days),
+            continuous_fail_hours=continuous_fail,
         )
 
-    # ========== 按小时（0-23）分组历史数据 ==========
-    hist_by_hod: Dict[int, List[HourlyAggregate]] = defaultdict(list)
-    for h in history_hours:
-        hist_by_hod[h.hour.hour].append(h)
+    history["hod"] = history["hour"].dt.hour
 
-    # ========== 评分参数（保持原权重） ==========
+    # 历史每小时典型样本数，用于过滤「不完整当前小时」
+    hist_count_by_hod = (
+        history.groupby("hod")["total_count"].median().to_dict()
+        if not history.empty else {}
+    )
+
     AnomalyThreshold = 70.0
     WarningThreshold = 50.0
     ChangeThreshold = 0.30
-    weights = {
-        "rtt_mean": 0.30,
-        "rtt_p95": 0.25,
-        "loss_rate": 0.45
-    }
+    weights = {"rtt_mean": 0.30, "rtt_p95": 0.25, "loss_rate": 0.45}
 
-    hour_scores = []  # 每个可对比小时的评分结果
+    # RTT 绝对安全区：在此范围内大幅限制相对打分（按你的业务可调）
+    RTT_SAFE_MEAN = 30.0   # ms
+    RTT_SAFE_P95 = 50.0    # ms
 
-    for cur in current_hours:
-        hod = cur.hour.hour
-        hist = hist_by_hod.get(hod, [])
-        if len(hist) < 3:  # 该小时历史样本不足 3 天，跳过
+    hour_scores = []
+
+    for _, cur in current.iterrows():
+        hod = int(cur["hour"].hour)
+        hist = history[history["hod"] == hod]
+        if len(hist) < 3:
+            continue
+
+        # 1) 跳过样本明显不足的当前小时（避免整天被半截小时拖垮）
+        expected = hist_count_by_hod.get(hod, 0)
+        if expected > 0 and cur["total_count"] < expected * 0.5:
             continue
 
         total_score = 0.0
         this_max_change = 0.0
         contribs = {}
 
-        for feat in ["rtt_mean", "rtt_p95", "loss_rate"]:
-            if feat == "rtt_mean":
-                vals = [h.rtt_mean for h in hist]
-                cur_val = cur.rtt_mean
-            elif feat == "rtt_p95":
-                vals = [h.rtt_p95 for h in hist]
-                cur_val = cur.rtt_p95
+        for feat in ("rtt_mean", "rtt_p95", "loss_rate"):
+            vals = hist[feat].astype(float).values
+            cur_val = float(cur[feat])
+
+            hist_mean = float(np.mean(vals)) if len(vals) else 0.0
+            hist_std = float(np.std(vals, ddof=1)) if len(vals) >= 2 else 0.0
+            hist_p95 = float(np.percentile(vals, 95)) if len(vals) else 0.0
+
+            if feat == "loss_rate":
+                hist_std = max(hist_std, 0.02)
+                hist_p95_safe = max(hist_p95, 0.02)
+                z = abs(cur_val - hist_mean) / hist_std
+                percent_score = max(0.0, (cur_val - hist_p95_safe) / (hist_p95_safe + 1e-6))
+                percent_score = min(percent_score, 3.0)
+                score = min(100.0, z * 15 + percent_score * 40)
+                if cur_val >= 0.20:
+                    score = min(100.0, score + 40)
+                elif cur_val >= 0.10:
+                    score = min(100.0, score + 25)
+                elif cur_val >= 0.05:
+                    score = min(100.0, score + 10)
             else:
-                vals = [h.loss_rate for h in hist]
-                cur_val = cur.loss_rate
+                # RTT：std 下限
+                hist_std = max(hist_std, hist_mean * 0.05 + 1e-6)
+                change = abs(cur_val - hist_mean) / (hist_mean + 1e-6)
+                if feat == "rtt_mean":
+                    this_max_change = change
 
-            hist_mean = mean(vals)
-            hist_std = std_dev(vals)
-            hist_p95 = percentile_95(vals)
+                z = abs(cur_val - hist_mean) / hist_std
+                percent_score = max(0.0, (cur_val - hist_p95) / (hist_p95 + 1e-6))
+                percent_score = min(percent_score, 5.0)
+                score = min(100.0, z * 15 + percent_score * 40)
 
-            change = abs(cur_val - hist_mean) / (hist_mean + 1e-6)
-            if feat == "rtt_mean":
-                this_max_change = change
+                # 2) 绝对安全区：相对升高但绝对值仍可接受时封顶
+                if feat == "rtt_mean" and cur_val < RTT_SAFE_MEAN:
+                    score = min(score, 40.0)
+                if feat == "rtt_p95" and cur_val < RTT_SAFE_P95:
+                    score = min(score, 40.0)
 
-            z = abs(cur_val - hist_mean) / hist_std if hist_std > 0 else 0.0
-            percent_score = max(0.0, (cur_val - hist_p95) / (hist_p95 + 1e-6))
-            score = min(100.0, z * 15 + percent_score * 40)
+                # 3) 当前小时 p95 相对 mean 过大 → 多为个别毛刺，降低 p95 权重贡献
+                if feat == "rtt_p95":
+                    cur_mean = float(cur["rtt_mean"])
+                    if cur_mean > 0 and cur_val > cur_mean * 2.5:
+                        score *= 0.5  # 离群毛刺降权
 
-            # 丢包率特殊加权
-            if feat == "loss_rate" and cur_val > 0.3:
-                score = min(100.0, score + cur_val * 50)
-
-            contribs[feat] = round(score, 2)
-            total_score += score * weights[feat]
+            contribs[feat] = round(min(100.0, score), 2)
+            total_score += contribs[feat] * weights[feat]
 
         hour_score = min(100.0, round(total_score, 1))
         hour_scores.append({
             "score": hour_score,
             "max_change": this_max_change,
             "contribs": contribs,
-            "hour": cur
+            "hour": cur["hour"],
         })
 
-    # 没有任何小时有足够历史样本
     if not hour_scores:
-        cur_rtt = mean([h.rtt_mean for h in current_hours if h.ok_count > 0]) if current_hours else 0.0
         return AnomalyResult(
             station_id=station_id,
             date=latest_date.strftime("%Y-%m-%d"),
             anomaly_score=0.0,
             alert_level="数据不足(小时历史不足)",
-            rtt_mean=round(cur_rtt, 2),
-            data_points=sum(h.total_count for h in current_hours),
-            history_days=unique_hist_days,
-            continuous_fail_hours=continuous_fail
+            rtt_mean=round(_cur_rtt(), 2),
+            data_points=int(current["total_count"].sum()),
+            history_days=int(unique_hist_days),
+            continuous_fail_hours=continuous_fail,
         )
 
-    # 取当天最差小时的分数作为最终分数（更能捕捉单小时异常）
+    scores = [x["score"] for x in hour_scores]
     worst = max(hour_scores, key=lambda x: x["score"])
-    score = worst["score"]
+    # 4) 不全信最差 1 小时：与当天小时分数的 75 分位加权
+    p75 = float(np.percentile(scores, 75))
+    score = round(0.6 * worst["score"] + 0.4 * p75, 1)
     max_change = worst["max_change"]
     contribs = worst["contribs"]
 
-    # 当前天整体 RTT 均值 & 历史整体基线
-    current_rtt_vals = [h.rtt_mean for h in current_hours if h.ok_count > 0]
-    current_rtt = mean(current_rtt_vals) if current_rtt_vals else 0.0
-    baseline_vals = [h.rtt_mean for h in history_hours if h.ok_count > 0]
-    baseline = mean(baseline_vals) if baseline_vals else 0.0
+    current_rtt = _cur_rtt()
+    base_vals = history.loc[history["ok_count"] > 0, "rtt_mean"]
+    baseline = float(base_vals.mean()) if len(base_vals) else 0.0
 
-    # 告警级别
     if max_change > ChangeThreshold and score >= WarningThreshold:
         alert = "🚨 重大突变"
     elif score >= AnomalyThreshold:
@@ -310,75 +342,61 @@ def compute_single_station(station_id: int, hours: List[HourlyAggregate],
         rtt_contrib=contribs.get("rtt_mean", 0),
         rtt_p95_contrib=contribs.get("rtt_p95", 0),
         loss_contrib=contribs.get("loss_rate", 0),
-        data_points=sum(h.total_count for h in current_hours),
-        history_days=unique_hist_days,
-        continuous_fail_hours=continuous_fail
+        data_points=int(current["total_count"].sum()),
+        history_days=int(unique_hist_days),
+        continuous_fail_hours=continuous_fail,
     )
 
-def check_continuous_fail(station_id: int, records: List[HourlyRecord], hours: int = 12) -> int:
-    """检查最近 N 小时是否全部失败，返回连续失败小时数"""
-    cutoff = datetime.now() - timedelta(hours=hours)
-    station_records = [r for r in records if r.station_id == station_id and r.timestamp >= cutoff]
-    if not station_records:
+def check_continuous_fail(station_id: int, df: pd.DataFrame, hours: int = 12) -> int:
+    """最近 N 小时是否全部失败，返回连续失败小时数"""
+    if df is None or df.empty:
         return 0
 
-    hour_status = defaultdict(list)
-    for r in station_records:
-        hour_key = r.timestamp.replace(minute=0, second=0, microsecond=0)
-        hour_status[hour_key].append(r.is_ok)
+    cutoff = datetime.now() - timedelta(hours=hours)
+    sub = df[(df["station_id"] == station_id) & (df["timestamp"] >= cutoff)]
+    if sub.empty:
+        return 0
 
-    continuous = 0
-    sorted_hours = sorted(hour_status.keys(), reverse=True)
-    for h in sorted_hours:
-        oks = hour_status[h]
-        if all(not ok for ok in oks):
-            continuous += 1
-        else:
-            break
-    return continuous
+    sub = sub.copy()
+    sub["hour"] = sub["timestamp"].dt.floor("h")
+    # 每小时是否全失败
+    hour_ok = sub.groupby("hour")["is_ok"].any()  # True=该小时至少一次成功
+    # 从近到远
+    for continuous, (h, any_ok) in enumerate(hour_ok.sort_index(ascending=False).items(), start=0):
+        if any_ok:
+            return continuous
+        # 若一直全失败，循环结束时返回总数
+    return len(hour_ok)
 
-# ====================== 辅助函数 ======================
-def mean(vals: List[float]) -> float:
-    return sum(vals) / len(vals) if vals else 0.0
-
-def std_dev(vals: List[float]) -> float:
-    if len(vals) < 2:
-        return 0.0
-    m = mean(vals)
-    return math.sqrt(sum((v - m) ** 2 for v in vals) / (len(vals) - 1))
-
-def percentile_95(vals: List[float]) -> float:
-    if not vals:
-        return 0.0
-    sorted_vals = sorted(vals)
-    idx = int(0.95 * (len(sorted_vals) - 1))
-    return sorted_vals[idx]
-
+# ====================== 落盘 ======================
 def save_anomaly_results(results: List[AnomalyResult]):
     log_dir = Path("/var/log/monitor_agent")
     log_dir.mkdir(parents=True, exist_ok=True)
     filename = log_dir / f"anomaly_{datetime.now().strftime('%Y%m%d')}.csv"
     try:
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write("station_id,date,anomaly_score,alert_level,rtt_mean,baseline_rtt,"
-                    "max_change_ratio,loss_contrib,continuous_fail_hours,history_days\n")
-            for r in results:
-                f.write(
-                    f"{r.station_id},{r.date},{r.anomaly_score},{r.alert_level},"
-                    f"{r.rtt_mean},{r.baseline_rtt},{r.max_change_ratio},"
-                    f"{r.loss_contrib},{r.continuous_fail_hours},{r.history_days}\n"
-                )
+        rows = [{
+            "station_id": r.station_id,
+            "date": r.date,
+            "anomaly_score": r.anomaly_score,
+            "alert_level": r.alert_level,
+            "rtt_mean": r.rtt_mean,
+            "baseline_rtt": r.baseline_rtt,
+            "max_change_ratio": r.max_change_ratio,
+            "loss_contrib": r.loss_contrib,
+            "continuous_fail_hours": r.continuous_fail_hours,
+            "history_days": r.history_days,
+        } for r in results]
+        pd.DataFrame(rows).to_csv(filename, index=False, encoding="utf-8")
         log.info(f"检测结果已保存为 {filename}")
     except Exception as e:
         log.error(f"保存异常结果失败: {e}")
 
-    # 清理过期文件（只保留最近 30 天）
+    # 清理 30 天前文件
     try:
         cutoff = datetime.now() - timedelta(days=30)
         for f in log_dir.glob("anomaly_*.csv"):
             try:
-                date_str = f.stem.split("_")[1]
-                file_date = datetime.strptime(date_str, "%Y%m%d")
+                file_date = datetime.strptime(f.stem.split("_")[1], "%Y%m%d")
                 if file_date < cutoff:
                     f.unlink()
                     log.info(f"已删除过期文件: {f.name}")
@@ -388,28 +406,44 @@ def save_anomaly_results(results: List[AnomalyResult]):
         log.warning(f"清理历史 anomaly 文件失败: {e}")
 
 # ====================== 日志解析 ======================
-def fetch_last_n_days_data(days: int = 7) -> List[HourlyRecord]:
+def fetch_last_n_days_data(days: int = 7) -> pd.DataFrame:
     start = datetime.now()
-    records = []
     cutoff = datetime.now() - timedelta(days=days)
+    frames = []
+
     with CacheMutex:
         stations = list(BaseStationCache.items())
+
     for station_id, bs in stations:
         ip = bs.get("ip", "").replace(".", "")
         log_file = Path("/var/log/monitor_agent") / f"ping_{ip}.log"
-        file_records = parse_log_file(str(log_file), station_id, cutoff)
-        records.extend(file_records)
-    log.info(f"日志解析完成，共读取 {len(records)} 条记录（最近 {days} 天），耗时 {datetime.now() - start}")
-    return records
+        part = parse_log_file(str(log_file), station_id, cutoff)
+        if not part.empty:
+            frames.append(part)
 
-def parse_log_file(filename: str, station_id: int, cutoff: datetime) -> List[HourlyRecord]:
-    records = []
+    if not frames:
+        log.info(f"日志解析完成，共读取 0 条记录（最近 {days} 天），耗时 {datetime.now() - start}")
+        return pd.DataFrame(columns=["station_id", "timestamp", "rtt", "is_ok"])
+
+    df = pd.concat(frames, ignore_index=True)
+    # 压缩内存
+    df["station_id"] = df["station_id"].astype("int32")
+    df["rtt"] = df["rtt"].astype("float32")
+    df["is_ok"] = df["is_ok"].astype("bool")
+    log.info(
+        f"日志解析完成，共读取 {len(df)} 条记录（最近 {days} 天），耗时 {datetime.now() - start}"
+    )
+    return df
+
+def parse_log_file(filename: str, station_id: int, cutoff: datetime) -> pd.DataFrame:
     path = Path(filename)
     if not path.exists():
-        return records
+        return pd.DataFrame(columns=["station_id", "timestamp", "rtt", "is_ok"])
+
     pattern = re.compile(
         r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*\|\s*seq=\d+\s*\|\s*(\w+)\s*\|\s*rtt=([\d.]+)\s*ms"
     )
+    rows = []
     try:
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
@@ -423,13 +457,12 @@ def parse_log_file(filename: str, station_id: int, cutoff: datetime) -> List[Hou
                     continue
                 if ts < cutoff:
                     continue
-                rtt = float(rtt_str)
-                records.append(HourlyRecord(
-                    station_id=station_id,
-                    timestamp=ts,
-                    rtt=rtt,
-                    is_ok=(status.upper() == "OK")
-                ))
+                rows.append((station_id, ts, float(rtt_str), status.upper() == "OK"))
     except Exception as e:
         log.warning(f"解析日志文件失败 {filename}: {e}")
-    return records
+        return pd.DataFrame(columns=["station_id", "timestamp", "rtt", "is_ok"])
+
+    if not rows:
+        return pd.DataFrame(columns=["station_id", "timestamp", "rtt", "is_ok"])
+
+    return pd.DataFrame(rows, columns=["station_id", "timestamp", "rtt", "is_ok"])
