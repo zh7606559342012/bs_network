@@ -264,7 +264,7 @@ def compute_single_station(
                 elif cur_val >= 0.05:
                     score = min(100.0, score + 10)
             else:
-                # RTT：std 下限
+                # RTT：双向波动都计分（变好/变差都算跳变）
                 hist_std = max(hist_std, hist_mean * 0.05 + 1e-6)
                 change = abs(cur_val - hist_mean) / (hist_mean + 1e-6)
                 if feat == "rtt_mean":
@@ -272,20 +272,32 @@ def compute_single_station(
 
                 z = abs(cur_val - hist_mean) / hist_std
                 percent_score = max(0.0, (cur_val - hist_p95) / (hist_p95 + 1e-6))
+                # 变好时 cur 可能低于 hist_p95，percent_score 为 0，靠 change 补分
                 percent_score = min(percent_score, 5.0)
+
                 score = min(100.0, z * 15 + percent_score * 40)
 
-                # 2) 绝对安全区：相对升高但绝对值仍可接受时封顶
-                if feat == "rtt_mean" and cur_val < RTT_SAFE_MEAN:
+                # ---- 大相对跳变加分（双向）----
+                # 30% / 50% / 80% 三档，保证「大跳变」能进关注甚至重大
+                if change >= 0.80:
+                    score = max(score, 75.0)
+                elif change >= 0.50:
+                    score = max(score, 60.0)
+                elif change >= 0.30:
+                    score = max(score, 45.0)
+
+                # ---- 安全区：只限制「小波动」，不压制「大跳变」----
+                # 绝对值仍很低且相对变化不大时，才封顶，避免正常抖动误报
+                if feat == "rtt_mean" and cur_val < RTT_SAFE_MEAN and change < 0.30:
                     score = min(score, 40.0)
-                if feat == "rtt_p95" and cur_val < RTT_SAFE_P95:
+                if feat == "rtt_p95" and cur_val < RTT_SAFE_P95 and change < 0.30:
                     score = min(score, 40.0)
 
-                # 3) 当前小时 p95 相对 mean 过大 → 多为个别毛刺，降低 p95 权重贡献
+                # p95 相对 mean 过大 → 多为毛刺，降权（保留）
                 if feat == "rtt_p95":
                     cur_mean = float(cur["rtt_mean"])
                     if cur_mean > 0 and cur_val > cur_mean * 2.5:
-                        score *= 0.5  # 离群毛刺降权
+                        score *= 0.5
 
             contribs[feat] = round(min(100.0, score), 2)
             total_score += contribs[feat] * weights[feat]
