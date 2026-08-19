@@ -10,6 +10,7 @@ class AppConfig(BaseSettings):
     version: str = "1.0.0"
     nfip: str = "127.0.0.1"
     telnet_addr: str = ":20055"
+    hostname: str = ""
 
 
 class LogConfig(BaseSettings):

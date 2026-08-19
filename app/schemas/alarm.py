@@ -41,6 +41,6 @@ class OamAlarm(BaseModel):
     event_time: int = 0
     host_name: str = ""
     instance_id: str = ""
-    mo_id: str = "system"
+    mo_id: str = "device"
     oui: str = ""
     sn: str = ""

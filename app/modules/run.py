@@ -65,7 +65,7 @@ async def ping_base_station(station):
     }
 
 
-def get_next_seq(station_id, ip, log_path):
+def get_next_seq(station_id, log_path):
     """从日志文件中读取最后的序列号，并返回下一个"""
     seq = 1  # 默认从1开始
     try:
@@ -85,17 +85,17 @@ def get_next_seq(station_id, ip, log_path):
 
 
 def write_ping_log(ping_result):
-    """按 IP 写日志文件（带序列号持久化）"""
+    """按 StationId 写日志文件（带序列号持久化） IP会发生变化 """
     if not ping_result:
         return
 
-    ip = ping_result["ip"].replace(".", "")
+    station_id = str(ping_result["station_id"])
     log_dir = Path("/var/log/monitor_agent")
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"ping_{ip}.log"
+    log_path = log_dir / f"ping_{station_id}.log"
 
     # ✅ 从日志文件读取下一个序列号
-    seq = get_next_seq(ping_result["station_id"], ip, log_path)
+    seq = get_next_seq(ping_result["station_id"], log_path)
 
     log_line = f"{ping_result['time']} | seq={seq:06d} | {ping_result['status']:4} | rtt={ping_result['rtt_ms']:.2f} ms\n"
 

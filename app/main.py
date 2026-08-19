@@ -5,6 +5,7 @@ from app.core.logger import log, setup_logger
 from app.core.database import init_redis
 from app.routers import oms, gnb
 from app.modules.run import start_modules
+from app.core.network import get_hostname
 import uvicorn
 
 
@@ -12,6 +13,14 @@ import uvicorn
 async def lifespan(app: FastAPI):
     """启动/关闭事件"""
     log.info(f"###### Monitor Agent starting, version: {settings.app.version} ######")
+
+    try:
+        hostname = get_hostname()
+        settings.app.hostname = hostname
+        log.info(f"machine: hostname={settings.app.hostname}")
+    except Exception as e:
+        log.error(f"get hostname failed: {e}")
+        settings.app.hostname = "unknown"
 
     # 初始化 Redis
     init_redis()

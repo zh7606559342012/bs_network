@@ -73,7 +73,7 @@ def _report_anomaly_alarm(r: AnomalyResult):
             AlarmParam(name="history_days", value=str(r.history_days)),
         ]
         alarm_id = "50004000"
-        alarm_identifier = f"bs location anomaly station:{r.station_id}"
+        alarm_identifier = f"bs detect anomaly abnormal"
         asyncio.create_task(
             send_alarm(
                 alarm_id=alarm_id,
@@ -425,8 +425,7 @@ def fetch_last_n_days_data(days: int = 7) -> pd.DataFrame:
         stations = list(BaseStationCache.items())
 
     for station_id, bs in stations:
-        ip = bs.get("ip", "").replace(".", "")
-        log_file = Path("/var/log/monitor_agent") / f"ping_{ip}.log"
+        log_file = Path("/var/log/monitor_agent") / f"ping_{station_id}.log"
         part = parse_log_file(str(log_file), station_id, cutoff)
         if not part.empty:
             frames.append(part)
