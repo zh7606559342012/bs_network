@@ -3,6 +3,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
 from app.modules.anomaly import detect_network_anomaly
 from app.modules.alarm import handler_alarm, init_alarm_maps
+from app.core.database import get_conf_from_redis
 import re
 from datetime import datetime, timedelta
 import json
@@ -97,7 +98,12 @@ def write_ping_log(ping_result):
     # ✅ 从日志文件读取下一个序列号
     seq = get_next_seq(ping_result["station_id"], log_path)
 
-    log_line = f"{ping_result['time']} | seq={seq:06d} | {ping_result['status']:4} | rtt={ping_result['rtt_ms']:.2f} ms\n"
+    if ping_result["status"] == "OK":
+        rtt_str = f"rtt={ping_result['rtt_ms']:.2f} ms"
+    else:
+        rtt_str = "rtt=- (timeout/unreachable)"
+
+    log_line = f"{ping_result['time']} | seq={seq:06d} | {ping_result['status']:4} | {rtt_str}\n"
 
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(log_line)
@@ -276,11 +282,19 @@ def start_modules():
         replace_existing=True
     )
 
-    # 🆕 4. 每天凌晨5点清理超过10天的日志
+    # 4. 每天凌晨5点清理超过10天的日志
     scheduler.add_job(
         clean_old_ping_logs,
         CronTrigger(hour=5, minute=0),
         id="clean_old_ping_logs",
+        replace_existing=True
+    )
+
+    # 5. 每 6 小时同步一次 OMS 配置（从 Redis 加载）
+    scheduler.add_job(
+        get_conf_from_redis,
+        IntervalTrigger(hours=6),
+        id="sync_oms_config",
         replace_existing=True
     )
 

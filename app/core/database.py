@@ -33,12 +33,17 @@ def init_redis() -> redis.Redis:
 
 
 def get_conf_from_redis():
-    """加载 OMS IP 等配置"""
+    """从 Redis 同步 OMS IP 配置（全部以 Redis 为准）"""
     global redis_client
-    if settings.oms.oms_ip:
-        redis_client.set("omsIp", settings.oms.oms_ip)
-    else:
-        settings.oms.oms_ip = redis_client.get("omsIp") or ""
+    try:
+        oms_ip = redis_client.get("omsIp") or ""
+        if settings.oms.oms_ip != oms_ip:
+            log.info(f"oms_ip 从 Redis 同步: {settings.oms.oms_ip or '空'} → {oms_ip or '空'}")
+            settings.oms.oms_ip = oms_ip
+        else:
+            log.debug(f"oms_ip 无需更新: {oms_ip or '空'}")
+    except Exception as e:
+        log.error(f"同步 oms 配置失败: {e}")
 
 
 def init_base_station_cache():
