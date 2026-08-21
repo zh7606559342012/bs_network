@@ -44,7 +44,7 @@ create_start_script() {
     cat << EOF > ${AGENT_BIN}/start_agent.sh
 #!/bin/bash
 cd ${AGENT_ROOT}
-${VENV_PATH}/bin/uvicorn app.main:app --host ${BIND_IP} --port 20000 --workers 2
+${VENV_PATH}/bin/uvicorn app.main:app --host ${BIND_IP} --port 20000 --workers 1
 EOF
     chmod +x ${AGENT_BIN}/start_agent.sh
 }
