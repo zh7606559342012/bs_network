@@ -13,6 +13,7 @@ from app.core.logger import log
 from app.core.database import BaseStationCache, CacheMutex
 from app.modules.alarm import send_alarm
 from app.schemas.alarm import AlarmType, AlarmParam
+from app.core.loop import get_main_loop
 
 # ====================== 结果对象（上报/落盘仍用） ======================
 class AnomalyResult:
@@ -20,7 +21,7 @@ class AnomalyResult:
         self.station_id = kwargs.get("station_id")
         self.date = kwargs.get("date")
         self.anomaly_score = kwargs.get("anomaly_score", 0.0)
-        self.alert_level = kwargs.get("alert_level", "正常")
+        self.alert_level = kwargs.get("alert_level", "normal")
         self.rtt_mean = kwargs.get("rtt_mean", 0.0)
         self.baseline_rtt = kwargs.get("baseline_rtt", 0.0)
         self.max_change_ratio = kwargs.get("max_change_ratio", 0.0)
@@ -72,17 +73,26 @@ def _report_anomaly_alarm(r: AnomalyResult):
             AlarmParam(name="continuous_fail_hours", value=str(r.continuous_fail_hours)),
             AlarmParam(name="history_days", value=str(r.history_days)),
         ]
+
         alarm_id = "50004000"
-        alarm_identifier = f"bs detect anomaly abnormal"
-        asyncio.create_task(
+        alarm_identifier = "bs detect anomaly abnormal"   # 建议和 AgwAlarmIdMap 的 key 对齐
+
+        # 在主 loop 里执行 send_alarm（线程安全）
+        loop = get_main_loop()
+        future = asyncio.run_coroutine_threadsafe(
             send_alarm(
                 alarm_id=alarm_id,
-                alarm_type=AlarmType.GENERATE,
+                alarm_type=AlarmType.GENERATE,   # 或 "GENERATE"，看你枚举定义
                 alarm_identifier=alarm_identifier,
+                instance_id = str(r.station_id),
                 extra_para=extra_para,
                 send_anyway=True,
-            )
+            ),
+            loop,
         )
+        # 可选：等放入队列完成（超时防止卡死）
+        future.result(timeout=5)
+
         log.info(f"已强制提交基站 {r.station_id} 异常告警到上报队列")
     except Exception as e:
         log.error(f"上报基站 {r.station_id} 异常告警失败: {e}")
@@ -165,7 +175,7 @@ def compute_single_station(
     all_df: 原始 ping（用于连续失败检测）
     """
     if hourly.empty:
-        return AnomalyResult(station_id=station_id, anomaly_score=0.0, alert_level="无数据")
+        return AnomalyResult(station_id=station_id, anomaly_score=0.0, alert_level="no data")
 
     hourly = hourly.copy()
     hourly["date"] = hourly["hour"].dt.date
@@ -186,7 +196,7 @@ def compute_single_station(
             station_id=station_id,
             date=latest_date.strftime("%Y-%m-%d"),
             anomaly_score=0.0,
-            alert_level="数据不足",
+            alert_level="Insufficient data (less three days)",
             rtt_mean=round(_cur_rtt(), 2),
             data_points=int(current["total_count"].sum()),
             history_days=int(unique_hist_days),
@@ -199,7 +209,7 @@ def compute_single_station(
             station_id=station_id,
             date=latest_date.strftime("%Y-%m-%d"),
             anomaly_score=100.0,
-            alert_level="🚨 连续12小时不通",
+            alert_level="more than no service for 12 consecutive hours.",
             rtt_mean=0.0,
             baseline_rtt=0.0,
             max_change_ratio=100.0,
@@ -315,7 +325,7 @@ def compute_single_station(
             station_id=station_id,
             date=latest_date.strftime("%Y-%m-%d"),
             anomaly_score=0.0,
-            alert_level="数据不足(小时历史不足)",
+            alert_level="Insufficient data (insufficient hourly history)",
             rtt_mean=round(_cur_rtt(), 2),
             data_points=int(current["total_count"].sum()),
             history_days=int(unique_hist_days),
@@ -335,9 +345,9 @@ def compute_single_station(
     baseline = float(base_vals.mean()) if len(base_vals) else 0.0
 
     if max_change > ChangeThreshold and score >= AnomalyThreshold:
-        alert = "🚨 重大突变"
+        alert = "重大突变"
     elif score >= WarningThreshold:
-        alert = "⚠️ 关注"
+        alert = "关注"
     else:
         alert = "正常"
 

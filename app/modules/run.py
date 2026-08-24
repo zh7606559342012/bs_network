@@ -17,7 +17,7 @@ from app.core.database import (
     get_redis,
     init_base_station_cache
 )
-import redis
+from app.core.loop import set_main_loop
 
 scheduler = BackgroundScheduler()
 
@@ -249,6 +249,9 @@ def clean_old_ping_logs():
 
 
 def start_modules():
+    """启动后台模块（由 FastAPI lifespan 在 async 上下文中调用）"""
+    set_main_loop(asyncio.get_running_loop())
+
     """启动后台模块"""
     log.info("Starting background modules...")
 
@@ -281,6 +284,15 @@ def start_modules():
         id="detect_network_anomaly",
         replace_existing=True
     )
+
+    # # test 每5mins执行一次
+    # scheduler.add_job(
+    #     detect_network_anomaly,
+    #     IntervalTrigger(minutes=3),
+    #     id="detect_network_anomaly",
+    #
+    #     replace_existing=True
+    # )
 
     # 4. 每天凌晨5点清理超过10天的日志
     scheduler.add_job(

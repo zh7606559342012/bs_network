@@ -19,7 +19,7 @@ AlarmRec: Dict[str, str] = {}
 AgwAlarmIdCacheMap: Dict[str, bool] = {}
 
 AgwAlarmIdMap: Dict[str, str] = {
-    "bs location anomaly": "50004000",
+    "bs detect anomaly abnormal": "50004000",
 }
 
 AlarmIdentifierMap: Dict[str, str] = {}
@@ -71,22 +71,22 @@ async def send_alarm_data_to_web(data: AlarmData) -> None:
     info = data.alarm_info
 
     oam = OamAlarm(
-        id=str(gen_id()),
-        name="om_alarm",
+        _id=str(gen_id()),
+        _name="om_alarm",
         alarm_id=info.alarm_id,
         alarm_identifier=info.alarm_location,
         alarm_param=", ".join([f"{p.name}{p.value}" for p in info.param]),
         alarm_type="report" if info.alarm_type == AlarmType.GENERATE else "clear",
         event_time=int(time.time() * 1000),
-        host_name=settings.app.hostname,
-        instance_id=settings.app.nfip,
+        hostname=settings.app.hostname,
+        instance_id=info.instance_id,
         mo_id="system",
     )
 
-    url = f"{settings.oms.proto}://{settings.oms.ip}:{settings.oms.port}/oamalarm/agent"
+    url = f"{settings.oms.oms_proto}://{settings.oms.oms_ip}:{settings.oms.oms_port}/oamalarm/agent"
     log.debug(f"send url: {url}, data: {oam.model_dump()}")
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
         resp = await client.post(url, json=oam.model_dump())
         resp.raise_for_status()
 
@@ -95,6 +95,7 @@ async def send_alarm(
     alarm_id: str,
     alarm_type: str,
     alarm_identifier: str,
+    instance_id: str,
     extra_para: List[AlarmParam] = None,
     send_anyway: bool = False
 ):
@@ -108,6 +109,7 @@ async def send_alarm(
             nf_type=alarm_identifier,
             alarm_type=alarm_type,
             alarm_location=alarm_identifier,
+            instance_id = instance_id,
             send_anyway=send_anyway,
             alarm_start_time=datetime.now().strftime("%Y.%m.%d %H:%M:%S"),
             param=extra_para,

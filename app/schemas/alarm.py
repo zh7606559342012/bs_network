@@ -20,6 +20,7 @@ class NagiosAlarm(BaseModel):
     alarm_type: str                 # "1" 产生 / "0" 恢复
     alarm_location: str = ""
     alarm_start_time: str = ""
+    instance_id: str = ""
     send_anyway: bool = False
     param: List[AlarmParam] = Field(default_factory=list)
     zabbix_event_id: str = ""
@@ -32,14 +33,14 @@ class AlarmData(BaseModel):
 
 class OamAlarm(BaseModel):
     """发送给 OMS 的最终告警结构"""
-    id: str = ""
-    name: str = "om_alarm"
+    _id: str = ""
+    _name: str = "om_alarm"
     alarm_id: str = ""
     alarm_identifier: str = ""
     alarm_param: str = ""
     alarm_type: str = ""            # report / clear
-    event_time: int = 0
-    host_name: str = ""
+    eventTime: int = 0
+    hostname: str = ""
     instance_id: str = ""
     mo_id: str = "device"
     oui: str = ""
