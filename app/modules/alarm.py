@@ -77,7 +77,7 @@ async def send_alarm_data_to_web(data: AlarmData) -> None:
         alarm_identifier=info.alarm_location,
         alarm_param=", ".join([f"{p.name}{p.value}" for p in info.param]),
         alarm_type="report" if info.alarm_type == AlarmType.GENERATE else "clear",
-        event_time=int(time.time() * 1000),
+        eventTime=int(time.time() * 1000),
         hostname=settings.app.hostname,
         instance_id=info.instance_id,
         mo_id="system",
