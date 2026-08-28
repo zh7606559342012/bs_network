@@ -63,8 +63,10 @@ def detect_network_anomaly():
 
 def _report_anomaly_alarm(r: AnomalyResult):
     try:
+        station_ip = get_station_ip(r.station_id)
         extra_para = [
             AlarmParam(name="station_id", value=str(r.station_id)),
+            AlarmParam(name="station_ip", value=station_ip),
             AlarmParam(name="anomaly_score", value=f"{r.anomaly_score:.1f}"),
             AlarmParam(name="alert_level", value=r.alert_level),
             AlarmParam(name="rtt_mean", value=f"{r.rtt_mean:.2f}"),
@@ -501,3 +503,17 @@ def parse_log_file(filename: str, station_id: int, cutoff: datetime) -> pd.DataF
     if not rows:
         return pd.DataFrame(columns=["station_id", "timestamp", "rtt", "is_ok"])
     return pd.DataFrame(rows, columns=["station_id", "timestamp", "rtt", "is_ok"])
+
+def get_station_ip(station_id) -> str:
+    if station_id is None:
+        return ""
+    try:
+        sid = int(station_id)
+    except (TypeError, ValueError):
+        return ""
+
+    with CacheMutex:
+        data = BaseStationCache.get(sid)
+        if not data:
+            return ""
+        return (data.get("ip") or "").strip()
