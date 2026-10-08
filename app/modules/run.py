@@ -4,6 +4,8 @@ from apscheduler.triggers.cron import CronTrigger
 from app.modules.anomaly import detect_network_anomaly
 from app.modules.alarm import handler_alarm, init_alarm_maps
 from app.core.database import get_conf_from_redis
+from app.core.loop import set_main_loop, get_main_loop
+from app.modules.ping_monitor import network_monitor_task
 import re
 from datetime import datetime, timedelta
 import json
@@ -261,12 +263,30 @@ def start_modules():
     # 2. 启动告警处理协程
     asyncio.create_task(handler_alarm())
 
-    # 1. 每 60 秒执行一次 Ping 监控
+    # 1. 每 1 h执行一次 Ping 监控
+    def _run_ping_job():
+        try:
+            loop = get_main_loop()
+        except RuntimeError as e:
+            log.error(f"{e}，跳过本轮 ping")
+            return
+        if not loop.is_running():
+            log.error("main loop 未在运行，跳过本轮 ping")
+            return
+        fut = asyncio.run_coroutine_threadsafe(network_monitor_task(), loop)
+        try:
+            fut.result(timeout=2000)
+        except Exception as e:
+            log.error(f"ping job failed: {e}")
+
     scheduler.add_job(
-        lambda: asyncio.run(network_monitor_task()),
-        IntervalTrigger(seconds=60),
+        _run_ping_job,
+        IntervalTrigger(hours=1),
         id="base_station_ping",
-        replace_existing=True
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=30,
     )
 
     # 2. 每 5 分钟同步 Redis → 内存缓存

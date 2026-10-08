@@ -185,7 +185,7 @@ env_check
 
 # 复制源码、配置和脚本
 cp -rf ${CUR_PATH}/app ${AGENT_ROOT}/ 2>/dev/null || true
-cp -f ${CUR_PATH}/bin/conf/* ${AGENT_ROOT}/conf/ 2>/dev/null || true
+cp -f ${CUR_PATH}/conf/* ${AGENT_ROOT}/conf/ 2>/dev/null || true
 cp -rf ${CUR_PATH}/scripts/* ${AGENT_ROOT}/scripts/ 2>/dev/null || true
 chmod +x ${AGENT_ROOT}/scripts/*.sh 2>/dev/null || true
 
