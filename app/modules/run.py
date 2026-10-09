@@ -8,9 +8,7 @@ from app.core.loop import set_main_loop, get_main_loop
 from app.modules.ping_monitor import network_monitor_task
 import re
 from datetime import datetime, timedelta
-import json
 import asyncio
-import os
 from pathlib import Path
 from app.core.logger import log
 from app.core.database import (
@@ -22,118 +20,6 @@ from app.core.database import (
 from app.core.loop import set_main_loop
 
 scheduler = BackgroundScheduler()
-
-
-
-async def ping_base_station(station):
-    """执行单次 Ping"""
-    ip = station.get("ip", "").strip()
-    if not ip:
-        return None
-
-    start = datetime.now()
-    try:
-        # 使用 ping 命令（Linux 系统）
-        proc = await asyncio.create_subprocess_shell(
-            f"ping -c 1 -W 5 -n {ip}",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await proc.communicate()
-        output = stdout.decode()
-
-        status = "OK"
-        rtt_ms = 0.0
-
-        if "time=" in output:
-            try:
-                # 提取 rtt
-                part = output.split("time=")[1].split(" ms")[0]
-                rtt_ms = float(part.strip())
-            except:
-                rtt_ms = (datetime.now() - start).total_seconds() * 1000
-        else:
-            status = "FAIL"
-            rtt_ms = -1
-    except Exception:
-        status = "FAIL"
-        rtt_ms = -1
-
-    return {
-        "station_id": station["station_id"],
-        "ip": ip,
-        "status": status,
-        "rtt_ms": round(rtt_ms, 2),
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
-
-
-def get_next_seq(station_id, log_path):
-    """从日志文件中读取最后的序列号，并返回下一个"""
-    seq = 1  # 默认从1开始
-    try:
-        if log_path.exists():
-            with open(log_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-                if lines:
-                    # 读取最后一行，提取 seq 值
-                    last_line = lines[-1]
-                    # 格式: 2026-07-23 16:20:25 | seq=000001 | OK | rtt=0.75 ms
-                    if "seq=" in last_line:
-                        seq_part = last_line.split("seq=")[1].split(" |")[0]
-                        seq = int(seq_part) + 1
-    except Exception as e:
-        log.warning(f"读取序列号失败: {e}")
-    return seq
-
-
-def write_ping_log(ping_result):
-    """按 StationId 写日志文件（带序列号持久化） IP会发生变化 """
-    if not ping_result:
-        return
-
-    station_id = str(ping_result["station_id"])
-    log_dir = Path("/var/log/monitor_agent")
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"ping_{station_id}.log"
-
-    # ✅ 从日志文件读取下一个序列号
-    seq = get_next_seq(ping_result["station_id"], log_path)
-
-    if ping_result["status"] == "OK":
-        rtt_str = f"rtt={ping_result['rtt_ms']:.2f} ms"
-    else:
-        rtt_str = "rtt=- (timeout/unreachable)"
-
-    log_line = f"{ping_result['time']} | seq={seq:06d} | {ping_result['status']:4} | {rtt_str}\n"
-
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(log_line)
-
-
-async def network_monitor_task():
-    """主监控任务"""
-    try:
-        log.info(f"=== Network Monitor Task Started, cached stations: {len(BaseStationCache)} ===")
-
-        with CacheMutex:
-            stations = list(BaseStationCache.values())
-
-        tasks = [ping_base_station(station) for station in stations]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        online_count = 0
-        for r in results:
-            if isinstance(r, dict):
-                write_ping_log(r)
-                if r["status"] == "OK":
-                    online_count += 1
-
-        log.info(f"Ping completed: {len(results)} stations, online: {online_count}")
-
-    except Exception as e:
-        log.error(f"Monitor task error: {e}")
-
 
 def sync_base_station_cache():
     """每 5 分钟从 Redis 同步到内存缓存（核心功能）"""
@@ -304,15 +190,6 @@ def start_modules():
         id="detect_network_anomaly",
         replace_existing=True
     )
-
-    # # test 每5mins执行一次
-    # scheduler.add_job(
-    #     detect_network_anomaly,
-    #     IntervalTrigger(minutes=3),
-    #     id="detect_network_anomaly",
-    #
-    #     replace_existing=True
-    # )
 
     # 4. 每天凌晨5点清理超过10天的日志
     scheduler.add_job(
