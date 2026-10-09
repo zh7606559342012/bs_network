@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -11,13 +12,12 @@ from app.core.database import BaseStationCache, CacheMutex
 from app.core.logger import log
 
 PING_CONCURRENCY = 10
+PING_BATCH_INTERVAL = 5.0
 PING_COUNT = 1
 PING_TIMEOUT = 3.0
 PING_LOG_DIR = Path("/var/log/monitor_agent")
-SLICE_COUNT = 1
 USE_PRIVILEGED: bool | None = None
 
-_tick = 0
 _privileged: bool | None = None
 _seq_cache: dict[str, int] = {}
 
@@ -84,14 +84,9 @@ async def detect_privileged() -> bool:
         return False
 
 
-def _pick_slice(stations: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    global _tick
-    if SLICE_COUNT <= 1:
-        _tick += 1
-        return stations
-    idx = _tick % SLICE_COUNT
-    _tick += 1
-    return [s for i, s in enumerate(stations) if i % SLICE_COUNT == idx]
+def _chunks(items: list[dict[str, Any]], size: int):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
 
 
 async def network_monitor_task() -> None:
@@ -104,57 +99,67 @@ async def network_monitor_task() -> None:
                 s for s in BaseStationCache.values()
                 if str(s.get("ip", "")).strip()
             ]
-        targets = _pick_slice(stations)
+        targets = list(stations)
+        batch_count = (len(targets) + PING_CONCURRENCY - 1) // PING_CONCURRENCY
         log.info(
             f"=== Network Monitor Task Started, cached={len(BaseStationCache)}, "
-            f"this_round={len(targets)}, privileged={_privileged} ==="
+            f"this_round={len(targets)}, batch={PING_CONCURRENCY}/{PING_BATCH_INTERVAL}s, "
+            f"batches={batch_count}, privileged={_privileged} ==="
         )
         if not targets:
             log.info("Ping completed: 0 stations, online: 0")
             return
 
-        ip_to_stations: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        for st in targets:
-            ip_to_stations[str(st["ip"]).strip()].append(st)
-
-        hosts = await async_multiping(
-            list(ip_to_stations.keys()),
-            count=PING_COUNT,
-            interval=0.2,
-            timeout=PING_TIMEOUT,
-            concurrent_tasks=PING_CONCURRENCY,
-            privileged=bool(_privileged),
-        )
-
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         results: list[dict[str, Any]] = []
-        got = set()
-        for host in hosts:
-            got.add(host.address)
-            status = "OK" if host.is_alive else "FAIL"
-            rtt = float(host.avg_rtt or 0.0) if host.is_alive else -1.0
-            for st in ip_to_stations.get(host.address, []):
-                results.append({
-                    "station_id": st["station_id"],
-                    "ip": host.address,
-                    "status": status,
-                    "rtt_ms": round(rtt, 2),
-                    "time": now,
-                })
+        for n, batch in enumerate(_chunks(targets, PING_CONCURRENCY), start=1):
+            ip_to_stations: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            for st in batch:
+                ip_to_stations[str(st["ip"]).strip()].append(st)
 
-        for ip, sts in ip_to_stations.items():
-            if ip in got:
-                continue
-            for st in sts:
-                results.append({
-                    "station_id": st["station_id"],
-                    "ip": ip,
-                    "status": "FAIL",
-                    "rtt_ms": -1.0,
-                    "time": now,
-                })
+            hosts = await async_multiping(
+                list(ip_to_stations.keys()),
+                count=PING_COUNT,
+                interval=0.2,
+                timeout=PING_TIMEOUT,
+                concurrent_tasks=PING_CONCURRENCY,
+                privileged=bool(_privileged),
+            )
 
-        write_ping_logs(results)
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            got = set()
+            batch_results: list[dict[str, Any]] = []
+            for host in hosts:
+                got.add(host.address)
+                status = "OK" if host.is_alive else "FAIL"
+                rtt = float(host.avg_rtt or 0.0) if host.is_alive else -1.0
+                for st in ip_to_stations.get(host.address, []):
+                    batch_results.append({
+                        "station_id": st["station_id"],
+                        "ip": host.address,
+                        "status": status,
+                        "rtt_ms": round(rtt, 2),
+                        "time": now,
+                    })
+            for ip, sts in ip_to_stations.items():
+                if ip in got:
+                    continue
+                for st in sts:
+                    batch_results.append({
+                        "station_id": st["station_id"],
+                        "ip": ip,
+                        "status": "FAIL",
+                        "rtt_ms": -1.0,
+                        "time": now,
+                    })
+
+            write_ping_logs(batch_results)
+            results.extend(batch_results)
+            online = sum(1 for r in batch_results if r["status"] == "OK")
+            log.info(f"Ping batch {n}/{batch_count}: {len(batch_results)} stations, online: {online}")
+
+            if n < batch_count:
+                await asyncio.sleep(PING_BATCH_INTERVAL)
+
         online = sum(1 for r in results if r["status"] == "OK")
         log.info(f"Ping completed: {len(results)} stations, online: {online}")
     except Exception as e:
