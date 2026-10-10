@@ -161,7 +161,7 @@ def start_modules():
             return
         fut = asyncio.run_coroutine_threadsafe(network_monitor_task(), loop)
         try:
-            fut.result(timeout=2000)
+            fut.result(timeout=3200)
         except Exception as e:
             log.error(f"ping job failed: {e}")
 
