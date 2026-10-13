@@ -6,12 +6,16 @@ VENV_PATH="${AGENT_ROOT}/venv"
 AGENT_LIB="${AGENT_ROOT}/lib"
 LOG_PATH="/var/log/monitor_agent"
 BIND_IP="0.0.0.0"
+OFFLINE=0
 
 die() { echo "$1"; exit 1; }
 
 usage() {
     script_name=$(basename "$0")
-    echo "./${script_name} [-i 0.0.0.0]  # bind local ip addr"
+    echo "Usage: ./${script_name} [-i 0.0.0.0] [--offline]"
+    echo "  -i, --ip        bind local ip addr, default 0.0.0.0"
+    echo "  -o, --offline   install Python deps from local wheels/"
+    echo "  -h, --help      show this help"
     exit 0
 }
 
@@ -34,10 +38,46 @@ env_check() {
     mkdir -p ${AGENT_ROOT} ${AGENT_BIN} ${VENV_PATH} ${LOG_PATH} ${AGENT_LIB} ${AGENT_ROOT}/conf ${AGENT_ROOT}/scripts
 }
 
+install_python_deps_online() {
+    python3 -m venv ${VENV_PATH} || die "创建 venv 失败，请安装 python3-venv"
+    ${VENV_PATH}/bin/pip install --upgrade pip || die "在线升级 pip 失败"
+    ${VENV_PATH}/bin/pip install -r ${CUR_PATH}/requirements.txt || die "在线安装 requirements.txt 失败"
+}
+
+install_python_deps_offline() {
+    command -v python3 >/dev/null || die "未找到 python3，现场需先安装 Python 3.10"
+    python3 -m venv ${VENV_PATH} || die "创建 venv 失败，请安装 python3-venv"
+
+    WHEEL_DIR="${CUR_PATH}/wheels"
+    REQ_LOCK="${CUR_PATH}/requirements.lock.txt"
+    REQ="${CUR_PATH}/requirements.txt"
+    PIP="${VENV_PATH}/bin/pip"
+
+    [ -d "${WHEEL_DIR}" ] || die "缺少离线包目录: ${WHEEL_DIR}"
+
+    ${PIP} install --upgrade --no-index --find-links="${WHEEL_DIR}" pip setuptools wheel \
+        || die "离线安装 pip/setuptools/wheel 失败"
+
+    if [ -f "${REQ_LOCK}" ]; then
+        ${PIP} install --no-index --find-links="${WHEEL_DIR}" -r "${REQ_LOCK}" \
+            || die "离线安装 requirements.lock.txt 失败"
+    else
+        ${PIP} install --no-index --find-links="${WHEEL_DIR}" -r "${REQ}" \
+            || die "离线安装 requirements.txt 失败"
+    fi
+
+    ${VENV_PATH}/bin/python -c "import fastapi, icmplib, pandas, uvicorn; print('deps ok')" \
+        || die "依赖导入检查失败"
+}
+
 install_python_deps() {
-    python3 -m venv ${VENV_PATH}
-    ${VENV_PATH}/bin/pip install --upgrade pip
-    ${VENV_PATH}/bin/pip install -r ${CUR_PATH}/requirements.txt
+    if [ "${OFFLINE}" -eq 1 ]; then
+        echo "=== Offline install: using ${CUR_PATH}/wheels ==="
+        install_python_deps_offline
+    else
+        echo "=== Online install: using requirements.txt ==="
+        install_python_deps_online
+    fi
 }
 
 create_start_script() {
@@ -160,11 +200,15 @@ while [[ $# -gt 0 ]]; do
             BIND_IP="$2"
             shift 2
             ;;
+        -o|--offline)
+            OFFLINE=1
+            shift
+            ;;
         -h|--help)
             usage
             ;;
         *)
-            echo "Invalid argument"
+            echo "Invalid argument: $1"
             usage
             ;;
     esac
@@ -202,6 +246,7 @@ systemctl enable --now monitor_agentwatching.timer
 
 echo "=== Monitor Agent installed successfully! ==="
 echo "Bind IP: ${BIND_IP}"
+echo "Install mode: $([ "${OFFLINE}" -eq 1 ] && echo offline || echo online)"
 systemctl status monitor_agent.service --no-pager
 echo "Redis status:"
 systemctl status redis --no-pager
