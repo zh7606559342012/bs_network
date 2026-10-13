@@ -12,7 +12,7 @@ from app.core.database import BaseStationCache, CacheMutex
 from app.core.logger import log
 
 PING_CONCURRENCY = 10
-PING_BATCH_INTERVAL = 5.0
+PING_BATCH_INTERVAL = 2.0
 PING_COUNT = 1
 PING_TIMEOUT = 3.0
 PING_LOG_DIR = Path("/var/log/monitor_agent")
