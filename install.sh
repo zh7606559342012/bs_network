@@ -44,9 +44,22 @@ install_python_deps_online() {
     ${VENV_PATH}/bin/pip install -r ${CUR_PATH}/requirements.txt || die "在线安装 requirements.txt 失败"
 }
 
+install_python_venv_offline() {
+    DEB_DIR="${CUR_PATH}/apt_debs"
+    [ -d "${DEB_DIR}" ] || die "缺少 python3-venv 离线包目录: ${DEB_DIR}"
+
+    echo "=== Installing python3.10-venv from local deb packages ==="
+    dpkg -i "${DEB_DIR}"/*.deb || die "离线安装 python3.10-venv 失败"
+}
+
 install_python_deps_offline() {
     command -v python3 >/dev/null || die "未找到 python3，现场需先安装 Python 3.10"
-    python3 -m venv ${VENV_PATH} || die "创建 venv 失败，请安装 python3-venv"
+
+    if ! dpkg -s python3.10-venv >/dev/null 2>&1; then
+        install_python_venv_offline
+    fi
+
+    python3 -m venv ${VENV_PATH} || die "创建 venv 失败"
 
     WHEEL_DIR="${CUR_PATH}/wheels"
     REQ_LOCK="${CUR_PATH}/requirements.lock.txt"
