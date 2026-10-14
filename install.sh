@@ -46,18 +46,20 @@ install_python_deps_online() {
 
 install_python_venv_offline() {
     DEB_DIR="${CUR_PATH}/apt_debs"
-    [ -d "${DEB_DIR}" ] || die "缺少 python3-venv 离线包目录: ${DEB_DIR}"
+    [ -d "${DEB_DIR}" ] || die "缺少 Python 离线 deb 包目录: ${DEB_DIR}"
 
-    echo "=== Installing python3.10-venv from local deb packages ==="
-    dpkg -i "${DEB_DIR}"/*.deb || die "离线安装 python3.10-venv 失败"
+    echo "=== Installing bundled Python 3.10 packages from local deb packages ==="
+    # 离线包中已包含同一版本的 python3.10 / minimal / libpython / stdlib / venv。
+    # 一次性安装，使目标机旧的 .12/.17 等版本统一升级到打包版本（当前为 .18）。
+    dpkg -i "${DEB_DIR}"/*.deb || die "离线升级 Python 3.10 系统组件失败"
 }
 
 install_python_deps_offline() {
     command -v python3 >/dev/null || die "未找到 python3，现场需先安装 Python 3.10"
 
-    if ! dpkg -s python3.10-venv >/dev/null 2>&1; then
-        install_python_venv_offline
-    fi
+    # 离线模式先安装/升级打包好的整套 Python 3.10 deb，
+    # 避免目标机 .12 与 python3.10-venv .18 混装导致依赖失败。
+    install_python_venv_offline
 
     python3 -m venv ${VENV_PATH} || die "创建 venv 失败"
 

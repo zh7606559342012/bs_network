@@ -150,21 +150,37 @@ chmod +x "${STAGE}/scripts/"*.sh 2>/dev/null || true
 
 
 # ============================================================
-# 下载 python3.x-venv 离线安装包
+# 下载 Python 3.x 系统组件 + venv 离线安装包
 # ============================================================
 
 command -v apt >/dev/null 2>&1 \
     || die "打包机缺少 apt 命令"
 
-log "下载 python${PY_VER}-venv 离线 deb 包"
+log "下载当前已安装的 Python ${PY_VER} 系统组件及 venv 离线 deb 包"
 
 (
     cd "${STAGE}/apt_debs"
 
-    apt download \
+    # 按打包机当前已安装版本下载，确保 Python 3.x 核心组件与 venv 版本一致。
+    # 例如当前环境为 3.10.12-1~22.04.18，则整套 .18 一起进入离线包。
+    for pkg in \
+        "python${PY_VER}" \
+        "python${PY_VER}-minimal" \
+        "libpython${PY_VER}" \
+        "libpython${PY_VER}-minimal" \
+        "libpython${PY_VER}-stdlib" \
         "python${PY_VER}-venv" \
         python3-pip-whl \
         python3-setuptools-whl
+    do
+        VER=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null) \
+            || die "打包机未安装软件包: $pkg"
+
+        log "下载 $pkg=$VER"
+
+        apt download "${pkg}=${VER}" \
+            || die "下载失败: $pkg=$VER"
+    done
 )
 
 # 确认 python3.x-venv 已经下载
@@ -289,6 +305,6 @@ echo "  ./install.sh -o -i 0.0.0.0"
 echo
 echo "离线包已包含："
 echo "  wheels/     Python 第三方依赖"
-echo "  apt_debs/   python${PY_VER}-venv 离线 deb"
+echo "  apt_debs/   Python ${PY_VER} 系统组件 + venv 离线 deb"
 echo
 echo "现场需已有 Python ${PY_VER}，且 uname -m 为 ${ARCH}。"
