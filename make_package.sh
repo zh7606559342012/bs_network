@@ -104,6 +104,7 @@ STAGE="${WORK}/${PKG_DIR_NAME}"
 mkdir -p \
     "${STAGE}/wheels" \
     "${STAGE}/apt_debs" \
+    "${STAGE}/python" \
     "${STAGE}/3rd" \
     "${STAGE}/bin" \
     "${STAGE}/lib" \
@@ -150,60 +151,56 @@ chmod +x "${STAGE}/scripts/"*.sh 2>/dev/null || true
 
 
 # ============================================================
-# 下载 Python 3.x 系统组件 + venv 离线安装包
+# Python 基础环境离线包
+# Ubuntu 保留原 apt_debs 逻辑；CentOS x86 打包当前 venv 对应的基础 Python
 # ============================================================
 
-command -v apt >/dev/null 2>&1 \
-    || die "打包机缺少 apt 命令"
+if grep -qi centos /etc/os-release; then
+    [ "${ARCH}" = "x86_64" ] || die "CentOS 当前仅适配 x86_64"
 
-log "下载当前已安装的 Python ${PY_VER} 系统组件及 venv 离线 deb 包"
+    PY_HOME=$(awk -F' = ' '/^home = / {print $2}' "${VENV_PATH}/pyvenv.cfg")
+    [ -n "${PY_HOME}" ] || die "无法从 ${VENV_PATH}/pyvenv.cfg 获取 Python home"
+    PY_BASE=$(dirname "${PY_HOME}")
+    [ -x "${PY_BASE}/bin/python3" ] || die "基础 Python 不存在: ${PY_BASE}/bin/python3"
 
-(
-    cd "${STAGE}/apt_debs"
+    PY_FULL_VER=$("${PY_BASE}/bin/python3" -c 'import platform; print(platform.python_version())')
+    log "CentOS x86：打包基础 Python ${PY_FULL_VER}: ${PY_BASE}"
+    mkdir -p "${STAGE}/python/${PY_FULL_VER}"
+    cp -a "${PY_BASE}/." "${STAGE}/python/${PY_FULL_VER}/"
+    OS_TYPE="centos"
+    PYTHON_BUNDLE="python/${PY_FULL_VER}"
+else
+    command -v apt >/dev/null 2>&1 \
+        || die "打包机缺少 apt 命令"
 
-    # 按打包机当前已安装版本下载，确保 Python 3.x 核心组件与 venv 版本一致。
-    # 例如当前环境为 3.10.12-1~22.04.18，则整套 .18 一起进入离线包。
-    for pkg in \
-        "python${PY_VER}" \
-        "python${PY_VER}-minimal" \
-        "libpython${PY_VER}" \
-        "libpython${PY_VER}-minimal" \
-        "libpython${PY_VER}-stdlib" \
-        "python${PY_VER}-venv" \
-        python3-pip-whl \
-        python3-setuptools-whl
-    do
-        VER=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null) \
-            || die "打包机未安装软件包: $pkg"
+    log "下载当前已安装的 Python ${PY_VER} 系统组件及 venv 离线 deb 包"
 
-        log "下载 $pkg=$VER"
+    (
+        cd "${STAGE}/apt_debs"
+        for pkg in \
+            "python${PY_VER}" \
+            "python${PY_VER}-minimal" \
+            "libpython${PY_VER}" \
+            "libpython${PY_VER}-minimal" \
+            "libpython${PY_VER}-stdlib" \
+            "python${PY_VER}-venv" \
+            python3-pip-whl \
+            python3-setuptools-whl
+        do
+            VER=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null) \
+                || die "打包机未安装软件包: $pkg"
+            log "下载 $pkg=$VER"
+            apt download "${pkg}=${VER}" || die "下载失败: $pkg=$VER"
+        done
+    )
 
-        apt download "${pkg}=${VER}" \
-            || die "下载失败: $pkg=$VER"
-    done
-)
-
-# 确认 python3.x-venv 已经下载
-VENV_DEB_COUNT=$(
-    find "${STAGE}/apt_debs" \
-        -maxdepth 1 \
-        -type f \
-        -name "python${PY_VER}-venv_*.deb" \
-        | wc -l
-)
-
-[ "${VENV_DEB_COUNT}" -gt 0 ] \
-    || die "未下载到 python${PY_VER}-venv deb 包"
-
-DEB_COUNT=$(
-    find "${STAGE}/apt_debs" \
-        -maxdepth 1 \
-        -type f \
-        -name '*.deb' \
-        | wc -l
-)
-
-log "apt_debs 数量: ${DEB_COUNT}"
+    VENV_DEB_COUNT=$(find "${STAGE}/apt_debs" -maxdepth 1 -type f -name "python${PY_VER}-venv_*.deb" | wc -l)
+    [ "${VENV_DEB_COUNT}" -gt 0 ] || die "未下载到 python${PY_VER}-venv deb 包"
+    DEB_COUNT=$(find "${STAGE}/apt_debs" -maxdepth 1 -type f -name '*.deb' | wc -l)
+    log "apt_debs 数量: ${DEB_COUNT}"
+    OS_TYPE="ubuntu"
+    PYTHON_BUNDLE="apt_debs"
+fi
 
 
 # ============================================================
@@ -219,6 +216,7 @@ log "从当前 venv 导出 requirements.lock.txt"
 log "下载 pip / setuptools / wheel"
 
 "${VENV_PATH}/bin/pip" download \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
     pip \
     setuptools \
     wheel \
@@ -227,6 +225,7 @@ log "下载 pip / setuptools / wheel"
 log "按 lock 下载全部依赖 wheel"
 
 "${VENV_PATH}/bin/pip" download \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
     -r "${STAGE}/requirements.lock.txt" \
     -d "${STAGE}/wheels"
 
@@ -274,7 +273,8 @@ python=${PY_VER}
 built_at=$(date '+%F %T')
 built_host=$(hostname)
 venv=${VENV_PATH}
-python_venv_deb=python${PY_VER}-venv
+os_type=${OS_TYPE}
+python_bundle=${PYTHON_BUNDLE}
 EOF
 
 
@@ -305,6 +305,10 @@ echo "  ./install.sh -o -i 0.0.0.0"
 echo
 echo "离线包已包含："
 echo "  wheels/     Python 第三方依赖"
-echo "  apt_debs/   Python ${PY_VER} 系统组件 + venv 离线 deb"
+if [ "${OS_TYPE}" = "centos" ]; then
+    echo "  python/      Python ${PY_FULL_VER} 基础环境"
+else
+    echo "  apt_debs/   Python ${PY_VER} 系统组件 + venv 离线 deb"
+fi
 echo
-echo "现场需已有 Python ${PY_VER}，且 uname -m 为 ${ARCH}。"
+echo "现场 uname -m 需为 ${ARCH}。"

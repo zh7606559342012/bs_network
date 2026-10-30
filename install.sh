@@ -9,6 +9,7 @@ BIND_IP="0.0.0.0"
 OFFLINE=0
 AGENT_USER="fsgeeker"
 AGENT_GROUP="fsgeeker"
+PYTHON_ROOT="/opt/python"
 
 die() { echo "$1"; exit 1; }
 
@@ -47,28 +48,41 @@ env_check() {
 
 install_python_deps_online() {
     python3 -m venv ${VENV_PATH} || die "创建 venv 失败，请安装 python3-venv"
-    ${VENV_PATH}/bin/pip install --upgrade pip || die "在线升级 pip 失败"
-    ${VENV_PATH}/bin/pip install -r ${CUR_PATH}/requirements.txt || die "在线安装 requirements.txt 失败"
+    ${VENV_PATH}/bin/pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --upgrade pip || die "在线升级 pip 失败"
+    ${VENV_PATH}/bin/pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r ${CUR_PATH}/requirements.txt || die "在线安装 requirements.txt 失败"
 }
 
 install_python_venv_offline() {
-    DEB_DIR="${CUR_PATH}/apt_debs"
-    [ -d "${DEB_DIR}" ] || die "缺少 Python 离线 deb 包目录: ${DEB_DIR}"
-
-    echo "=== Installing bundled Python 3.10 packages from local deb packages ==="
-    # 离线包中已包含同一版本的 python3.10 / minimal / libpython / stdlib / venv。
-    # 一次性安装，使目标机旧的 .12/.17 等版本统一升级到打包版本（当前为 .18）。
-    dpkg -i "${DEB_DIR}"/*.deb || die "离线升级 Python 3.10 系统组件失败"
+    if [ "${OS_TYPE}" = "ubuntu" ]; then
+        DEB_DIR="${CUR_PATH}/apt_debs"
+        [ -d "${DEB_DIR}" ] || die "缺少 Python 离线 deb 包目录: ${DEB_DIR}"
+        echo "=== Installing bundled Python packages from local deb packages ==="
+        dpkg -i "${DEB_DIR}"/*.deb || die "离线升级 Python 系统组件失败"
+    elif [ "${OS_TYPE}" = "centos" ]; then
+        PY_BUNDLE=$(find "${CUR_PATH}/python" -mindepth 1 -maxdepth 1 -type d | head -1)
+        [ -n "${PY_BUNDLE}" ] || die "缺少 Python 离线基础环境目录: ${CUR_PATH}/python"
+        PY_FULL_VER=$(basename "${PY_BUNDLE}")
+        mkdir -p "${PYTHON_ROOT}"
+        rm -rf "${PYTHON_ROOT}/${PY_FULL_VER}"
+        cp -a "${PY_BUNDLE}" "${PYTHON_ROOT}/${PY_FULL_VER}" || die "复制 Python 基础环境失败"
+        chown -R root:root "${PYTHON_ROOT}/${PY_FULL_VER}"
+        chmod 755 "${PYTHON_ROOT}" "${PYTHON_ROOT}/${PY_FULL_VER}"
+        [ -x "${PYTHON_ROOT}/${PY_FULL_VER}/bin/python3" ] || die "离线 Python 不可执行"
+        OFFLINE_PYTHON="${PYTHON_ROOT}/${PY_FULL_VER}/bin/python3"
+        echo "=== Installed bundled Python to ${PYTHON_ROOT}/${PY_FULL_VER} ==="
+    fi
 }
 
 install_python_deps_offline() {
-    command -v python3 >/dev/null || die "未找到 python3，现场需先安装 Python 3.10"
-
-    # 离线模式先安装/升级打包好的整套 Python 3.10 deb，
-    # 避免目标机 .12 与 python3.10-venv .18 混装导致依赖失败。
+    # 离线模式按系统类型安装/释放打包好的 Python 基础环境。
     install_python_venv_offline
 
-    python3 -m venv ${VENV_PATH} || die "创建 venv 失败"
+    if [ "${OS_TYPE}" = "centos" ]; then
+        ${OFFLINE_PYTHON} -m venv ${VENV_PATH} || die "创建 venv 失败"
+    else
+        command -v python3 >/dev/null || die "未找到 python3，现场需先安装 Python"
+        python3 -m venv ${VENV_PATH} || die "创建 venv 失败"
+    fi
 
     WHEEL_DIR="${CUR_PATH}/wheels"
     REQ_LOCK="${CUR_PATH}/requirements.lock.txt"
@@ -183,8 +197,6 @@ Description=Watching Monitor Agent process
 
 [Service]
 Type=simple
-User=${AGENT_USER}
-Group=${AGENT_GROUP}
 ExecStart=${AGENT_BIN}/agent_watching.sh
 EOF
 
