@@ -219,6 +219,7 @@ log "从当前 venv 导出 requirements.lock.txt"
 log "下载 pip / setuptools / wheel"
 
 "${VENV_PATH}/bin/pip" download \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
     pip \
     setuptools \
     wheel \
@@ -227,6 +228,7 @@ log "下载 pip / setuptools / wheel"
 log "按 lock 下载全部依赖 wheel"
 
 "${VENV_PATH}/bin/pip" download \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
     -r "${STAGE}/requirements.lock.txt" \
     -d "${STAGE}/wheels"
 

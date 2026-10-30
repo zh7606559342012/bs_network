@@ -47,8 +47,8 @@ env_check() {
 
 install_python_deps_online() {
     python3 -m venv ${VENV_PATH} || die "创建 venv 失败，请安装 python3-venv"
-    ${VENV_PATH}/bin/pip install --upgrade pip || die "在线升级 pip 失败"
-    ${VENV_PATH}/bin/pip install -r ${CUR_PATH}/requirements.txt || die "在线安装 requirements.txt 失败"
+    ${VENV_PATH}/bin/pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --upgrade pip || die "在线升级 pip 失败"
+    ${VENV_PATH}/bin/pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r ${CUR_PATH}/requirements.txt || die "在线安装 requirements.txt 失败"
 }
 
 install_python_venv_offline() {
@@ -183,8 +183,6 @@ Description=Watching Monitor Agent process
 
 [Service]
 Type=simple
-User=${AGENT_USER}
-Group=${AGENT_GROUP}
 ExecStart=${AGENT_BIN}/agent_watching.sh
 EOF
 
