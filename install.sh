@@ -7,6 +7,8 @@ AGENT_LIB="${AGENT_ROOT}/lib"
 LOG_PATH="/var/log/monitor_agent"
 BIND_IP="0.0.0.0"
 OFFLINE=0
+AGENT_USER="fsgeeker"
+AGENT_GROUP="fsgeeker"
 
 die() { echo "$1"; exit 1; }
 
@@ -34,6 +36,11 @@ disable_selinux() {
 env_check() {
     systemctl stop monitor_agent.service 2>/dev/null
     systemctl stop monitor_agentwatching.timer 2>/dev/null
+
+    # Monitor Agent 使用固定用户/用户组运行；不存在时自动创建
+    getent group ${AGENT_GROUP} >/dev/null 2>&1 || groupadd -r ${AGENT_GROUP}
+    id -u ${AGENT_USER} >/dev/null 2>&1 || useradd -r -g ${AGENT_GROUP} -s /sbin/nologin ${AGENT_USER}
+
     rm -rf ${AGENT_ROOT} >/dev/null 2>&1
     mkdir -p ${AGENT_ROOT} ${AGENT_BIN} ${VENV_PATH} ${LOG_PATH} ${AGENT_LIB} ${AGENT_ROOT}/conf ${AGENT_ROOT}/scripts
 }
@@ -111,7 +118,8 @@ Description=Monitor Agent Service
 After=network.target redis.service
 
 [Service]
-User=root
+User=${AGENT_USER}
+Group=${AGENT_GROUP}
 WorkingDirectory=${AGENT_ROOT}
 ExecStart=${AGENT_BIN}/start_agent.sh
 Restart=always
@@ -175,6 +183,8 @@ Description=Watching Monitor Agent process
 
 [Service]
 Type=simple
+User=${AGENT_USER}
+Group=${AGENT_GROUP}
 ExecStart=${AGENT_BIN}/agent_watching.sh
 EOF
 
@@ -253,6 +263,12 @@ create_start_script
 create_main_service
 redis_check
 create_watchdog_service
+
+# Agent 自身目录/文件归 fsgeeker；Redis 的 lib 目录保持 redis:redis
+chown -R ${AGENT_USER}:${AGENT_GROUP} ${AGENT_ROOT}
+chown -R ${AGENT_USER}:${AGENT_GROUP} ${LOG_PATH}
+chown -R redis:redis ${AGENT_LIB}
+
 _gen_logrotate
 
 systemctl daemon-reload
