@@ -2,6 +2,7 @@
 import re
 import math
 import asyncio
+import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
@@ -395,6 +396,7 @@ def save_anomaly_results(results: List[AnomalyResult]):
     log_dir = Path("/var/log/monitor_agent")
     log_dir.mkdir(parents=True, exist_ok=True)
     filename = log_dir / f"anomaly_{datetime.now().strftime('%Y%m%d')}.csv"
+
     try:
         rows = [{
             "station_id": r.station_id,
@@ -408,8 +410,13 @@ def save_anomaly_results(results: List[AnomalyResult]):
             "continuous_fail_hours": r.continuous_fail_hours,
             "history_days": r.history_days,
         } for r in results]
+
+        file_not_exists = not filename.exists()
         pd.DataFrame(rows).to_csv(filename, index=False, encoding="utf-8")
+        if file_not_exists:
+            shutil.chown(filename, user="fsgeeker", group="fsgeeker")
         log.info(f"检测结果已保存为 {filename}")
+
     except Exception as e:
         log.error(f"保存异常结果失败: {e}")
 

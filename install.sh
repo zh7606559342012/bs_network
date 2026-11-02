@@ -36,12 +36,15 @@ env_check() {
     systemctl stop monitor_agentwatching.timer 2>/dev/null
     rm -rf ${AGENT_ROOT} >/dev/null 2>&1
     mkdir -p ${AGENT_ROOT} ${AGENT_BIN} ${VENV_PATH} ${LOG_PATH} ${AGENT_LIB} ${AGENT_ROOT}/conf ${AGENT_ROOT}/scripts
+    getent group fsgeeker >/dev/null 2>&1 || groupadd -r fsgeeker
+    id -u fsgeeker >/dev/null 2>&1 || useradd -r -g fsgeeker -s /sbin/nologin fsgeeker
+    chown -R fsgeeker:fsgeeker ${LOG_PATH}
 }
 
 install_python_deps_online() {
     python3 -m venv ${VENV_PATH} || die "创建 venv 失败，请安装 python3-venv"
-    ${VENV_PATH}/bin/pip install --upgrade pip || die "在线升级 pip 失败"
-    ${VENV_PATH}/bin/pip install -r ${CUR_PATH}/requirements.txt || die "在线安装 requirements.txt 失败"
+    ${VENV_PATH}/bin/pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --upgrade pip || die "在线升级 pip 失败"
+    ${VENV_PATH}/bin/pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r ${CUR_PATH}/requirements.txt || die "在线安装 requirements.txt 失败"
 }
 
 install_python_venv_offline() {
