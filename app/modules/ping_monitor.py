@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -63,8 +64,14 @@ def write_ping_logs(results: list[dict[str, Any]]) -> None:
             lines.append(
                 f"{r['time']} | seq={seq:06d} | {r['status']:4} | {rtt_str}\n"
             )
+        # 写入前判断文件是否已经存在
+        file_not_exists = not log_path.exists()
+        # 文件不存在时 "a" 会自动创建；存在时直接追加
         with open(log_path, "a", encoding="utf-8") as f:
             f.writelines(lines)
+        # 仅第一次创建文件后修改属主和属组
+        if file_not_exists:
+            shutil.chown(log_path, user="fsgeeker", group="fsgeeker")
 
 
 async def detect_privileged() -> bool:

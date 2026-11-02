@@ -103,7 +103,6 @@ STAGE="${WORK}/${PKG_DIR_NAME}"
 
 mkdir -p \
     "${STAGE}/wheels" \
-    "${STAGE}/apt_debs" \
     "${STAGE}/3rd" \
     "${STAGE}/bin" \
     "${STAGE}/lib" \
@@ -150,60 +149,15 @@ chmod +x "${STAGE}/scripts/"*.sh 2>/dev/null || true
 
 
 # ============================================================
-# 下载 Python 3.x 系统组件 + venv 离线安装包
+# CentOS 7.9 离线包不再下载 Ubuntu apt/deb 系统组件。
+# 目标机使用自身 python3 创建 venv；这里仅打包 Python 第三方依赖。
 # ============================================================
 
-command -v apt >/dev/null 2>&1 \
-    || die "打包机缺少 apt 命令"
+if [ ! -f /etc/centos-release ]; then
+    die "当前 make_package.sh 用于 CentOS 7.x 打包机"
+fi
 
-log "下载当前已安装的 Python ${PY_VER} 系统组件及 venv 离线 deb 包"
-
-(
-    cd "${STAGE}/apt_debs"
-
-    # 按打包机当前已安装版本下载，确保 Python 3.x 核心组件与 venv 版本一致。
-    # 例如当前环境为 3.10.12-1~22.04.18，则整套 .18 一起进入离线包。
-    for pkg in \
-        "python${PY_VER}" \
-        "python${PY_VER}-minimal" \
-        "libpython${PY_VER}" \
-        "libpython${PY_VER}-minimal" \
-        "libpython${PY_VER}-stdlib" \
-        "python${PY_VER}-venv" \
-        python3-pip-whl \
-        python3-setuptools-whl
-    do
-        VER=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null) \
-            || die "打包机未安装软件包: $pkg"
-
-        log "下载 $pkg=$VER"
-
-        apt download "${pkg}=${VER}" \
-            || die "下载失败: $pkg=$VER"
-    done
-)
-
-# 确认 python3.x-venv 已经下载
-VENV_DEB_COUNT=$(
-    find "${STAGE}/apt_debs" \
-        -maxdepth 1 \
-        -type f \
-        -name "python${PY_VER}-venv_*.deb" \
-        | wc -l
-)
-
-[ "${VENV_DEB_COUNT}" -gt 0 ] \
-    || die "未下载到 python${PY_VER}-venv deb 包"
-
-DEB_COUNT=$(
-    find "${STAGE}/apt_debs" \
-        -maxdepth 1 \
-        -type f \
-        -name '*.deb' \
-        | wc -l
-)
-
-log "apt_debs 数量: ${DEB_COUNT}"
+log "CentOS 7.x 打包：跳过 Ubuntu apt/deb Python 系统包"
 
 
 # ============================================================
@@ -274,7 +228,7 @@ python=${PY_VER}
 built_at=$(date '+%F %T')
 built_host=$(hostname)
 venv=${VENV_PATH}
-python_venv_deb=python${PY_VER}-venv
+python_runtime=target_machine_python3
 EOF
 
 

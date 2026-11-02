@@ -39,29 +39,22 @@ env_check() {
 }
 
 install_python_deps_online() {
-    python3 -m venv ${VENV_PATH} || die "创建 venv 失败，请安装 python3-venv"
+    # CentOS 7.9 在线安装：优先使用现场已有 python3；没有时再通过 yum 安装。
+    if ! command -v python3 >/dev/null 2>&1; then
+        yum install -y python3 python3-pip || die "在线安装 python3/python3-pip 失败"
+    fi
+
+    python3 -m venv ${VENV_PATH} || die "创建 venv 失败，请确认当前 python3 支持 venv"
     ${VENV_PATH}/bin/pip install --upgrade pip || die "在线升级 pip 失败"
     ${VENV_PATH}/bin/pip install -r ${CUR_PATH}/requirements.txt || die "在线安装 requirements.txt 失败"
 }
 
-install_python_venv_offline() {
-    DEB_DIR="${CUR_PATH}/apt_debs"
-    [ -d "${DEB_DIR}" ] || die "缺少 Python 离线 deb 包目录: ${DEB_DIR}"
-
-    echo "=== Installing bundled Python 3.10 packages from local deb packages ==="
-    # 离线包中已包含同一版本的 python3.10 / minimal / libpython / stdlib / venv。
-    # 一次性安装，使目标机旧的 .12/.17 等版本统一升级到打包版本（当前为 .18）。
-    dpkg -i "${DEB_DIR}"/*.deb || die "离线升级 Python 3.10 系统组件失败"
-}
-
 install_python_deps_offline() {
-    command -v python3 >/dev/null || die "未找到 python3，现场需先安装 Python 3.10"
+    # CentOS 7.9 离线模式不再安装 Ubuntu deb 包。
+    # 现场需已有可执行的 python3，由本机 python3 创建全新的 venv。
+    command -v python3 >/dev/null 2>&1 || die "未找到 python3，CentOS 离线安装现场需预先具备 Python3"
 
-    # 离线模式先安装/升级打包好的整套 Python 3.10 deb，
-    # 避免目标机 .12 与 python3.10-venv .18 混装导致依赖失败。
-    install_python_venv_offline
-
-    python3 -m venv ${VENV_PATH} || die "创建 venv 失败"
+    python3 -m venv ${VENV_PATH} || die "创建 venv 失败，请确认当前 python3 支持 venv"
 
     WHEEL_DIR="${CUR_PATH}/wheels"
     REQ_LOCK="${CUR_PATH}/requirements.lock.txt"
@@ -229,14 +222,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# OS 检查
-if grep -qi centos /etc/os-release; then
-    OS_TYPE="centos"
-elif grep -qi ubuntu /etc/os-release; then
-    OS_TYPE="ubuntu"
-else
-    echo "Unsupported OS, only support Ubuntu & CentOS."
-    exit 1
+# OS 检查：本脚本用于 CentOS 7.x
+if ! grep -qi centos /etc/os-release; then
+    die "Unsupported OS, this install.sh is for CentOS 7.x."
 fi
 
 disable_selinux
