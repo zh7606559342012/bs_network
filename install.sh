@@ -36,6 +36,9 @@ env_check() {
     systemctl stop monitor_agentwatching.timer 2>/dev/null
     rm -rf ${AGENT_ROOT} >/dev/null 2>&1
     mkdir -p ${AGENT_ROOT} ${AGENT_BIN} ${VENV_PATH} ${LOG_PATH} ${AGENT_LIB} ${AGENT_ROOT}/conf ${AGENT_ROOT}/scripts
+    getent group fsgeeker >/dev/null 2>&1 || groupadd -r fsgeeker
+    id -u fsgeeker >/dev/null 2>&1 || useradd -r -g fsgeeker -s /sbin/nologin fsgeeker
+    chown -R fsgeeker:fsgeeker ${LOG_PATH}
 }
 
 install_python_deps_online() {
